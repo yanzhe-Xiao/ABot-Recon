@@ -11,3 +11,5 @@ checkpoints/
 examples/images/
 
 *.so
+data/
+*.tgz

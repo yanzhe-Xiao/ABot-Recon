@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABot-Recon 3D 点云交互式可视化系统</title>
+  <style>
+    :root {
+      --bg-color: #0f1117;
+      --panel-bg: rgba(22, 27, 34, 0.85);
+      --panel-border: rgba(255, 255, 255, 0.12);
+      --accent-color: #3b82f6;
+      --accent-hover: #60a5fa;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--text-main);
+    }
+
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+
+    /* 顶部导航标题栏 */
+    .top-bar {
+      position: absolute;
+      top: 16px;
+      left: 20px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      padding: 10px 18px;
+      border-radius: 12px;
+      border: 1px solid var(--panel-border);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+
+    .top-bar h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 3px 8px;
+      background: rgba(59, 130, 246, 0.2);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 6px;
+    }
+
+    /* 侧边控制面板 */
+    .control-panel {
+      position: absolute;
+      top: 16px;
+      right: 20px;
+      width: 320px;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border-radius: 14px;
+      border: 1px solid var(--panel-border);
+      padding: 18px;
+      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .control-panel::-webkit-scrollbar {
+      width: 6px;
+    }
+    .control-panel::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 3px;
+    }
+
+    .panel-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .section-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-muted);
+      font-weight: 700;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 4px;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .control-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .control-row label {
+      color: var(--text-main);
+    }
+
+    .control-row .val {
+      font-size: 12px;
+      color: #60a5fa;
+      font-family: monospace;
+    }
+
+    select, input[type="file"], button {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--panel-border);
+      color: var(--text-main);
+      padding: 7px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+
+    select:hover, button:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: var(--accent-color);
+    }
+
+    select option {
+      background: #1f2937;
+      color: #fff;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 5px;
+      accent-color: var(--accent-color);
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.15);
+      outline: none;
+      cursor: pointer;
+    }
+
+    .btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .btn-group-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+    }
+
+    button.btn-primary {
+      background: var(--accent-color);
+      color: white;
+      font-weight: 500;
+      border: none;
+    }
+
+    button.btn-primary:hover {
+      background: var(--accent-hover);
+    }
+
+    /* 快捷视角按钮 */
+    .view-btn {
+      font-size: 12px;
+      padding: 6px;
+      text-align: center;
+    }
+
+    /* 开关复选框 */
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .checkbox-row input {
+      accent-color: var(--accent-color);
+      cursor: pointer;
+    }
+
+    /* 底部统计信息 */
+    .stats-card {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #93c5fd;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* 操作提示栏 (底部) */
+    .help-bar {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      padding: 8px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--panel-border);
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .help-item span {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      color: #e5e7eb;
+      font-weight: bold;
+      margin-right: 4px;
+    }
+
+    /* 加载中动画遮罩 */
+    #loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 17, 23, 0.85);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+      transition: opacity 0.3s ease;
+    }
+
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid rgba(59, 130, 246, 0.2);
+      border-top-color: var(--accent-color);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #loading-text {
+      font-size: 14px;
+      color: #e5e7eb;
+      letter-spacing: 0.5px;
+    }
+  </style>
+  <!-- Three.js 与 OrbitControls (本地优先) -->
+  <script src="/viewer/libs/three.min.js"></script>
+  <script src="/viewer/libs/OrbitControls.js"></script>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <!-- 顶部状态栏 -->
+  <div class="top-bar">
+    <h1>ABot-Recon 3D 浏览器</h1>
+    <span class="badge" id="backend-badge">WebGL 2.0</span>
+  </div>
+
+  <!-- 侧边交互控制器 -->
+  <div class="control-panel">
+    <div class="panel-section">
+      <div class="section-title">点云数据源</div>
+      <div class="control-group">
+        <label for="model-select" style="font-size:12px; color:var(--text-muted);">选择预设重建结果</label>
+        <select id="model-select">
+          <option value="/outputs/demo_loop/reconstruction.ply">✨ 回环优化结果 (Loop Closure)</option>
+          <option value="/outputs/demo_noloop/reconstruction.ply">🚀 流式原始预测 (No Loop)</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label style="font-size:12px; color:var(--text-muted);">或上传本地 PLY 文件</label>
+        <input type="file" id="file-input" accept=".ply">
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="section-title">渲染控制</div>
+      
+      <div class="control-group">
+        <div class="control-row">
+          <label for="point-size">点大小 (Size)</label>
+          <span class="val" id="point-size-val">0.012</span>
+        </div>
+        <input type="range" id="point-size" min="0.001" max="0.05" step="0.001" value="0.012">
+      </div>
+
+      <div class="control-group">
+        <label style="font-size:13px;">着色模式 (Color Mode)</label>
+        <select id="color-mode">
+          <option value="rgb">🎨 原始 RGB 真彩色</option>
+          <option value="height">🌈 高度渐变 (Z-Height)</option>
+          <option value="depth">🌐 景深渐变 (Depth Map)</option>
+          <option value="intensity">⚡ 强度/单色 (Solid Light)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <div class="control-row">
+          <label for="sampling-rate">点云下采样</label>
+          <span class="val" id="sampling-val">100%</span>
+        </div>
+        <input type="range" id="sampling-rate" min="10" max="100" step="10" value="100">
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="section-title">视角与辅助</div>
+      <div class="btn-group-3">
+        <button class="view-btn" id="btn-view-front">正视 (Front)</button>
+        <button class="view-btn" id="btn-view-top">俯视 (Top)</button>
+        <button class="view-btn" id="btn-view-side">侧视 (Side)</button>
+      </div>
+      <button class="view-btn" id="btn-view-reset" style="margin-top:2px;">🔄 重置默认视角</button>
+
+      <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+        <label class="checkbox-row">
+          <input type="checkbox" id="chk-trajectory" checked>
+          <span>显示相机位姿轨迹 (Trajectory)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="chk-axes" checked>
+          <span>显示世界坐标轴 (XYZ Axes)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="chk-grid" checked>
+          <span>显示参考地网 (Ground Grid)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="chk-autorotate">
+          <span>自动平滑旋转展示</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="section-title">模型统计信息</div>
+      <div class="stats-card">
+        <div>点云数量: <span id="stat-points" style="color:#fff;">0</span></div>
+        <div>包围盒尺寸: <span id="stat-bbox" style="color:#fff;">0 × 0 × 0 m</span></div>
+        <div>中心坐标: <span id="stat-center" style="color:#fff;">(0, 0, 0)</span></div>
+        <div>渲染帧率: <span id="stat-fps" style="color:#10b981;">60 FPS</span></div>
+      </div>
+      <button class="btn-primary" id="btn-screenshot" style="margin-top:4px;">📸 导出当前高清截图</button>
+    </div>
+  </div>
+
+  <!-- 底部操作快捷指南 -->
+  <div class="help-bar">
+    <div class="help-item"><span>左键拖拽</span> 旋转视角</div>
+    <div class="help-item"><span>右键拖拽</span> 平移视角</div>
+    <div class="help-item"><span>滚轮缩放</span> 推进/拉远</div>
+    <div class="help-item"><span>快捷键 R</span> 视角归位</div>
+  </div>
+
+  <!-- 加载遮罩 -->
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">正在加载 3D 点云数据...</div>
+  </div>
+
+  <script>
+    // --- 全局变量与 Three.js 场景初始化 ---
+    let scene, camera, renderer, controls;
+    let pointCloudMesh = null;
+    let trajectoryGroup = new THREE.Group();
+    let axesHelper, gridHelper;
+    let rawPositions = null, rawColors = null;
+    let originalBBox = null;
+    let frameCount = 0, lastFpsTime = performance.now();
+
+    const container = document.getElementById('canvas-container');
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const loadingText = document.getElementById('loading-text');
+
+    function initScene() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0f1117);
+
+      camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
+      camera.position.set(0.5, -0.8, -0.8);
+      camera.up.set(0, -1, 0); // OpenCV/NeRF 坐标系对齐 (Y 向下, Z 向前)
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      container.appendChild(renderer.domElement);
+
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.screenSpacePanning = true;
+
+      // 坐标轴辅助 (X: 红, Y: 绿, Z: 蓝)
+      axesHelper = new THREE.AxesHelper(0.3);
+      scene.add(axesHelper);
+
+      // 地面网格辅助
+      gridHelper = new THREE.GridHelper(4, 40, 0x3b82f6, 0x1f2937);
+      gridHelper.position.y = 0.5;
+      scene.add(gridHelper);
+
+      scene.add(trajectoryGroup);
+
+      // 光照 (辅助材质)
+      const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
+      scene.add(ambientLight);
+
+      window.addEventListener('resize', onWindowResize);
+      window.addEventListener('keydown', onKeyDown);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onKeyDown(e) {
+      if (e.key === 'r' || e.key === 'R') resetView();
+      if (e.key === 't' || e.key === 'T') setTopView();
+      if (e.key === 'f' || e.key === 'F') setFrontView();
+      if (e.key === 's' || e.key === 'S') setSideView();
+    }
+
+    // --- 高性能原生二进制 PLY 解析器 ---
+    function parseBinaryPLY(buffer) {
+      const headerText = new TextDecoder('latin1').decode(new Uint8Array(buffer, 0, Math.min(2048, buffer.byteLength)));
+      const headerEndIndex = headerText.indexOf('end_header\n');
+      if (headerEndIndex === -1) {
+        throw new Error("无法解析 PLY 文件头: 未找到 end_header");
+      }
+
+      const header = headerText.slice(0, headerEndIndex);
+      const lines = header.split('\n');
+      let vertexCount = 0;
+      let properties = [];
+
+      let inVertex = false;
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[0] === 'element' && parts[1] === 'vertex') {
+          vertexCount = parseInt(parts[2], 10);
+          inVertex = true;
+        } else if (parts[0] === 'element' && parts[1] !== 'vertex') {
+          inVertex = false;
+        } else if (inVertex && parts[0] === 'property') {
+          properties.push({ type: parts[1], name: parts[2] });
+        }
+      }
+
+      const bodyOffset = headerEndIndex + 'end_header\n'.length;
+      const dataView = new DataView(buffer, bodyOffset);
+
+      const positions = new Float32Array(vertexCount * 3);
+      const colors = new Float32Array(vertexCount * 3);
+
+      // 计算每个顶点的步长
+      let stride = 0;
+      let xOff = -1, yOff = -1, zOff = -1;
+      let rOff = -1, gOff = -1, bOff = -1;
+
+      for (const p of properties) {
+        if (p.name === 'x') xOff = stride;
+        if (p.name === 'y') yOff = stride;
+        if (p.name === 'z') zOff = stride;
+        if (p.name === 'red') rOff = stride;
+        if (p.name === 'green') gOff = stride;
+        if (p.name === 'blue') bOff = stride;
+
+        if (p.type === 'float') stride += 4;
+        else if (p.type === 'uchar' || p.type === 'uint8') stride += 1;
+        else if (p.type === 'int' || p.type === 'uint' || p.type === 'int32') stride += 4;
+        else if (p.type === 'short' || p.type === 'ushort') stride += 2;
+        else if (p.type === 'double') stride += 8;
+      }
+
+      let offset = 0;
+      for (let i = 0; i < vertexCount; i++) {
+        const pIdx = i * 3;
+        positions[pIdx] = dataView.getFloat32(offset + xOff, true);
+        positions[pIdx + 1] = dataView.getFloat32(offset + yOff, true);
+        positions[pIdx + 2] = dataView.getFloat32(offset + zOff, true);
+
+        if (rOff !== -1) {
+          colors[pIdx] = dataView.getUint8(offset + rOff) / 255.0;
+          colors[pIdx + 1] = dataView.getUint8(offset + gOff) / 255.0;
+          colors[pIdx + 2] = dataView.getUint8(offset + bOff) / 255.0;
+        } else {
+          colors[pIdx] = 0.8;
+          colors[pIdx + 1] = 0.8;
+          colors[pIdx + 2] = 0.8;
+        }
+        offset += stride;
+      }
+
+      return { positions, colors, vertexCount };
+    }
+
+    // --- 构建点云几何对象 ---
+    function buildPointCloud(positions, colors) {
+      if (pointCloudMesh) {
+        scene.remove(pointCloudMesh);
+        pointCloudMesh.geometry.dispose();
+        pointCloudMesh.material.dispose();
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.computeBoundingBox();
+      originalBBox = geometry.boundingBox;
+
+      const size = parseFloat(document.getElementById('point-size').value);
+      const material = new THREE.PointsMaterial({
+        size: size,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.95
+      });
+
+      pointCloudMesh = new THREE.Points(geometry, material);
+      scene.add(pointCloudMesh);
+
+      // 更新统计信息
+      document.getElementById('stat-points').innerText = (positions.length / 3).toLocaleString();
+      const center = new THREE.Vector3();
+      originalBBox.getCenter(center);
+      const dimensions = new THREE.Vector3();
+      originalBBox.getSize(dimensions);
+
+      document.getElementById('stat-bbox').innerText = `${dimensions.x.toFixed(2)} × ${dimensions.y.toFixed(2)} × ${dimensions.z.toFixed(2)} m`;
+      document.getElementById('stat-center').innerText = `(${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`;
+
+      gridHelper.position.y = originalBBox.max.y + 0.1;
+      applyColorMode();
+    }
+
+    // --- 加载相机轨迹可视化 ---
+    function parseNpy(buffer) {
+      const u8 = new Uint8Array(buffer);
+      if (u8[0] !== 0x93 || u8[1] !== 0x4E || u8[2] !== 0x55 || u8[3] !== 0x4D || u8[4] !== 0x50 || u8[5] !== 0x59) {
+        throw new Error("Invalid NPY format");
+      }
+      const major = u8[6];
+      let offset = 10 + (u8[8] | (u8[9] << 8));
+      if (major >= 2) {
+        offset = 12 + (u8[8] | (u8[9] << 8) | (u8[10] << 16) | (u8[11] << 24));
+      }
+      return new Float32Array(buffer.slice(offset));
+    }
+
+    function createCameraFrustum(scale = 0.035, color = 0x38bdf8) {
+      const group = new THREE.Group();
+      const w = scale * 0.8, h = scale * 0.5, d = scale * 1.2;
+      const vertices = new Float32Array([
+        0, 0, 0,  -w, -h, d,
+        0, 0, 0,   w, -h, d,
+        0, 0, 0,   w,  h, d,
+        0, 0, 0,  -w,  h, d,
+        -w, -h, d,  w, -h, d,
+         w, -h, d,  w,  h, d,
+         w,  h, d, -w,  h, d,
+        -w,  h, d, -w, -h, d,
+        0, -h * 1.3, d,  -w * 0.4, -h, d,
+        0, -h * 1.3, d,   w * 0.4, -h, d
+      ]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+      const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 1.5 });
+      group.add(new THREE.LineSegments(geo, mat));
+      return group;
+    }
+
+    // --- 加载相机轨迹可视化 ---
+    async function loadTrajectory(url) {
+      trajectoryGroup.clear();
+      try {
+        const trajUrl = url.replace('reconstruction.ply', 'camera_poses.npy');
+        const resp = await fetch(trajUrl);
+        if (!resp.ok) return;
+
+        const buffer = await resp.arrayBuffer();
+        const floatData = parseNpy(buffer);
+        const numPoses = floatData.length / 16;
+
+        const points = [];
+        for (let i = 0; i < numPoses; i++) {
+          const off = i * 16;
+          const mat = new THREE.Matrix4().set(
+            floatData[off], floatData[off+1], floatData[off+2], floatData[off+3],
+            floatData[off+4], floatData[off+5], floatData[off+6], floatData[off+7],
+            floatData[off+8], floatData[off+9], floatData[off+10], floatData[off+11],
+            0, 0, 0, 1
+          );
+          const pos = new THREE.Vector3(floatData[off+3], floatData[off+7], floatData[off+11]);
+          points.push(pos);
+
+          // 视锥体标记 (每隔两帧或关键帧放置)
+          if (i % 2 === 0 || i === numPoses - 1) {
+            const isFirstOrLast = (i === 0 || i === numPoses - 1);
+            const frustum = createCameraFrustum(0.04, isFirstOrLast ? 0xf59e0b : 0x38bdf8);
+            frustum.matrixAutoUpdate = false;
+            frustum.matrix.copy(mat);
+            trajectoryGroup.add(frustum);
+          }
+        }
+
+        // 轨迹平滑路径
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
+        const line = new THREE.Line(lineGeo, lineMat);
+        trajectoryGroup.add(line);
+      } catch (err) {
+        console.warn("未找到轨迹数据或解析失败:", err);
+      }
+    }
+
+    // --- 加载 PLY 统一入口 ---
+    async function loadPLYFromUrl(url) {
+      showLoading(`正在拉取 ${url.split('/').pop()}...`);
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const buffer = await response.arrayBuffer();
+        
+        showLoading("正在解析 3D 几何特征与颜色...");
+        const parsed = parseBinaryPLY(buffer);
+        rawPositions = parsed.positions;
+        rawColors = parsed.colors;
+
+        buildPointCloud(rawPositions, rawColors);
+        await loadTrajectory(url);
+
+        resetView();
+        hideLoading();
+      } catch (err) {
+        alert("加载点云失败: " + err.message);
+        hideLoading();
+      }
+    }
+
+    function loadPLYFromFile(file) {
+      showLoading(`正在读取本地文件: ${file.name}...`);
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          showLoading("正在解析顶点数据...");
+          const parsed = parseBinaryPLY(e.target.result);
+          rawPositions = parsed.positions;
+          rawColors = parsed.colors;
+          buildPointCloud(rawPositions, rawColors);
+          trajectoryGroup.clear();
+          resetView();
+          hideLoading();
+        } catch (err) {
+          alert("解析文件失败: " + err.message);
+          hideLoading();
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    // --- 色彩变换模式 ---
+    function applyColorMode() {
+      if (!pointCloudMesh || !rawPositions || !rawColors) return;
+
+      const mode = document.getElementById('color-mode').value;
+      const count = rawPositions.length / 3;
+      const sampling = parseInt(document.getElementById('sampling-rate').value, 10) / 100.0;
+      const step = Math.max(1, Math.round(1 / sampling));
+
+      const activeCount = Math.floor(count / step);
+      const filteredPos = new Float32Array(activeCount * 3);
+      const filteredCol = new Float32Array(activeCount * 3);
+
+      let minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < count; i += step) {
+        const z = rawPositions[i * 3 + 2];
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+      const rangeZ = (maxZ - minZ) || 1.0;
+
+      let dstIdx = 0;
+      for (let i = 0; i < count; i += step) {
+        const srcIdx = i * 3;
+        const x = rawPositions[srcIdx];
+        const y = rawPositions[srcIdx + 1];
+        const z = rawPositions[srcIdx + 2];
+
+        filteredPos[dstIdx] = x;
+        filteredPos[dstIdx + 1] = y;
+        filteredPos[dstIdx + 2] = z;
+
+        if (mode === 'rgb') {
+          filteredCol[dstIdx] = rawColors[srcIdx];
+          filteredCol[dstIdx + 1] = rawColors[srcIdx + 1];
+          filteredCol[dstIdx + 2] = rawColors[srcIdx + 2];
+        } else if (mode === 'height') {
+          // 彩虹光谱渐变
+          const t = Math.max(0, Math.min(1, (z - minZ) / rangeZ));
+          const col = new THREE.Color().setHSL(0.7 * (1.0 - t), 1.0, 0.5);
+          filteredCol[dstIdx] = col.r;
+          filteredCol[dstIdx + 1] = col.g;
+          filteredCol[dstIdx + 2] = col.b;
+        } else if (mode === 'depth') {
+          const dist = Math.sqrt(x*x + y*y + z*z);
+          const t = Math.min(1.0, dist / 2.0);
+          filteredCol[dstIdx] = 0.2 + 0.8 * t;
+          filteredCol[dstIdx + 1] = 0.8 * (1.0 - t);
+          filteredCol[dstIdx + 2] = 1.0 - t;
+        } else if (mode === 'intensity') {
+          filteredCol[dstIdx] = 0.9;
+          filteredCol[dstIdx + 1] = 0.9;
+          filteredCol[dstIdx + 2] = 0.95;
+        }
+        dstIdx += 3;
+      }
+
+      pointCloudMesh.geometry.setAttribute('position', new THREE.BufferAttribute(filteredPos, 3));
+      pointCloudMesh.geometry.setAttribute('color', new THREE.BufferAttribute(filteredCol, 3));
+      pointCloudMesh.geometry.attributes.position.needsUpdate = true;
+      pointCloudMesh.geometry.attributes.color.needsUpdate = true;
+    }
+
+    // --- 视角控制函数 ---
+    function resetView() {
+      if (!originalBBox) return;
+      const center = new THREE.Vector3();
+      originalBBox.getCenter(center);
+      controls.target.copy(center);
+      camera.position.set(center.x + 0.4, center.y - 0.7, center.z - 0.7);
+      camera.up.set(0, -1, 0);
+      controls.update();
+    }
+
+    function setFrontView() {
+      if (!originalBBox) return;
+      const center = new THREE.Vector3();
+      originalBBox.getCenter(center);
+      controls.target.copy(center);
+      camera.position.set(center.x, center.y, center.z - 1.2);
+      camera.up.set(0, -1, 0);
+      controls.update();
+    }
+
+    function setTopView() {
+      if (!originalBBox) return;
+      const center = new THREE.Vector3();
+      originalBBox.getCenter(center);
+      controls.target.copy(center);
+      camera.position.set(center.x, center.y - 1.5, center.z);
+      camera.up.set(0, 0, 1);
+      controls.update();
+    }
+
+    function setSideView() {
+      if (!originalBBox) return;
+      const center = new THREE.Vector3();
+      originalBBox.getCenter(center);
+      controls.target.copy(center);
+      camera.position.set(center.x + 1.2, center.y, center.z);
+      camera.up.set(0, -1, 0);
+      controls.update();
+    }
+
+    function showLoading(msg) {
+      loadingText.innerText = msg;
+      loadingOverlay.style.display = 'flex';
+      loadingOverlay.style.opacity = '1';
+    }
+
+    function hideLoading() {
+      loadingOverlay.style.opacity = '0';
+      setTimeout(() => { loadingOverlay.style.display = 'none'; }, 300);
+    }
+
+    // --- 事件监听绑定 ---
+    document.getElementById('model-select').addEventListener('change', (e) => {
+      loadPLYFromUrl(e.target.value);
+    });
+
+    document.getElementById('file-input').addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        loadPLYFromFile(e.target.files[0]);
+      }
+    });
+
+    document.getElementById('point-size').addEventListener('input', (e) => {
+      const val = parseFloat(e.target.value);
+      document.getElementById('point-size-val').innerText = val.toFixed(3);
+      if (pointCloudMesh) pointCloudMesh.material.size = val;
+    });
+
+    document.getElementById('color-mode').addEventListener('change', applyColorMode);
+
+    document.getElementById('sampling-rate').addEventListener('input', (e) => {
+      document.getElementById('sampling-val').innerText = e.target.value + '%';
+      applyColorMode();
+    });
+
+    document.getElementById('chk-trajectory').addEventListener('change', (e) => {
+      trajectoryGroup.visible = e.target.checked;
+    });
+
+    document.getElementById('chk-axes').addEventListener('change', (e) => {
+      axesHelper.visible = e.target.checked;
+    });
+
+    document.getElementById('chk-grid').addEventListener('change', (e) => {
+      gridHelper.visible = e.target.checked;
+    });
+
+    document.getElementById('chk-autorotate').addEventListener('change', (e) => {
+      controls.autoRotate = e.target.checked;
+      controls.autoRotateSpeed = 1.8;
+    });
+
+    document.getElementById('btn-view-reset').addEventListener('click', resetView);
+    document.getElementById('btn-view-front').addEventListener('click', setFrontView);
+    document.getElementById('btn-view-top').addEventListener('click', setTopView);
+    document.getElementById('btn-view-side').addEventListener('click', setSideView);
+
+    document.getElementById('btn-screenshot').addEventListener('click', () => {
+      renderer.render(scene, camera);
+      const dataUrl = renderer.domElement.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.download = `abot_recon_${Date.now()}.png`;
+      a.href = dataUrl;
+      a.click();
+    });
+
+    // --- 动画主循环 ---
+    function animate(time) {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+
+      // 计算 FPS
+      frameCount++;
+      if (time - lastFpsTime >= 1000) {
+        document.getElementById('stat-fps').innerText = `${frameCount} FPS`;
+        frameCount = 0;
+        lastFpsTime = time;
+      }
+    }
+
+    // --- 页面加载完成后启动 ---
+    window.onload = () => {
+      initScene();
+      animate(performance.now());
+      loadPLYFromUrl('/outputs/demo_loop/reconstruction.ply');
+    };
+  </script>
+</body>
+</html>
