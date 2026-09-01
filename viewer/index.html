@@ -428,14 +428,20 @@
       </div>
 
       <div class="control-group">
-        <div class="control-row">
-          <label for="voxel-size" style="font-size:12px;">体素去重 (Voxel Grid)</label>
-          <span class="val" id="voxel-size-val">1.0 cm</span>
-        </div>
-        <input type="range" id="voxel-size" min="0.005" max="0.04" step="0.005" value="0.01">
-        <span style="font-size:11px; color:#9ca3af;">自动合并空间重叠点，杜绝暴力堆叠与显存暴增</span>
+        <label style="font-size:12px; color:var(--text-muted);">建图精度 / 去重模式</label>
+        <select id="dedup-mode">
+          <option value="none" selected>🌟 1:1 全精细模式 (52.9万点，与 PLY 完全一致)</option>
+          <option value="voxel">⚡ 空间体素去重模式 (轻量精简)</option>
+        </select>
       </div>
-    </div>
+
+      <div class="control-group" id="voxel-control-group" style="display:none;">
+        <div class="control-row">
+          <label for="voxel-size" style="font-size:12px;">体素大小 (Voxel Grid)</label>
+          <span class="val" id="voxel-size-val">5.0 mm</span>
+        </div>
+        <input type="range" id="voxel-size" min="0.002" max="0.02" step="0.001" value="0.005">
+      </div>
 
     <!-- 离线点云数据源切换 -->
     <div class="panel-section">
@@ -684,33 +690,32 @@
 
     // --- 空间体素去重与增量点云追加 ---
     function appendPointsWithVoxelGrid(newPoints, newColors) {
-      const voxelSize = parseFloat(document.getElementById('voxel-size').value);
-      const invVoxel = 1.0 / voxelSize;
+      const dedupMode = document.getElementById('dedup-mode').value;
 
-      let addedCount = 0;
-      for (let i = 0; i < newPoints.length; i++) {
-        const x = newPoints[i][0];
-        const y = newPoints[i][1];
-        const z = newPoints[i][2];
+      if (dedupMode === 'none') {
+        // 🌟 1:1 全精细无去重模式：保留全部 529,200 个空间点，与离线 PLY 100% 相同
+        for (let i = 0; i < newPoints.length; i++) {
+          allPositions.push(newPoints[i][0], newPoints[i][1], newPoints[i][2]);
+          allColors.push(newColors[i][0] / 255.0, newColors[i][1] / 255.0, newColors[i][2] / 255.0);
+        }
+      } else {
+        // ⚡ 空间体素网格去重模式
+        const voxelSize = parseFloat(document.getElementById('voxel-size').value);
+        const invVoxel = 1.0 / voxelSize;
+        for (let i = 0; i < newPoints.length; i++) {
+          const x = newPoints[i][0], y = newPoints[i][1], z = newPoints[i][2];
+          const vx = Math.round(x * invVoxel);
+          const vy = Math.round(y * invVoxel);
+          const vz = Math.round(z * invVoxel);
+          const key = `${vx}_${vy}_${vz}`;
 
-        // 计算空间体素三维网格索引
-        const vx = Math.round(x * invVoxel);
-        const vy = Math.round(y * invVoxel);
-        const vz = Math.round(z * invVoxel);
-        const key = `${vx}_${vy}_${vz}`;
-
-        const r = newColors[i][0] / 255.0;
-        const g = newColors[i][1] / 255.0;
-        const b = newColors[i][2] / 255.0;
-
-        if (!voxelMap.has(key)) {
-          voxelMap.set(key, { x, y, z, r, g, b });
-          allPositions.push(x, y, z);
-          allColors.push(r, g, b);
-          addedCount++;
+          if (!voxelMap.has(key)) {
+            voxelMap.set(key, true);
+            allPositions.push(x, y, z);
+            allColors.push(newColors[i][0] / 255.0, newColors[i][1] / 255.0, newColors[i][2] / 255.0);
+          }
         }
       }
-
       // 更新 GPU 显存缓冲区
       const totalPoints = allPositions.length / 3;
       const geo = pointCloudMesh.geometry;
@@ -1060,6 +1065,10 @@
     // --- 事件监听绑定 ---
     document.getElementById('btn-stream-toggle').addEventListener('click', startLiveStream);
 
+    document.getElementById('dedup-mode').addEventListener('change', (e) => {
+      const isVoxel = e.target.value === 'voxel';
+      document.getElementById('voxel-control-group').style.display = isVoxel ? 'flex' : 'none';
+    });
     document.getElementById('voxel-size').addEventListener('input', (e) => {
       const v = parseFloat(e.target.value);
       document.getElementById('voxel-size-val').innerText = `${(v * 100).toFixed(1)} cm`;
