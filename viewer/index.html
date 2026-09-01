@@ -434,10 +434,11 @@
         </div>
         <div class="btn-group">
           <select id="stream-max-frames">
-            <option value="60" selected>前 60 帧 (极速体验)</option>
+            <option value="0" selected>全部帧 (完整全长视频流)</option>
+            <option value="60">前 60 帧 (快速体验)</option>
             <option value="120">前 120 帧 (平滑长程)</option>
-            <option value="250">前 250 帧 (宏大场景)</option>
-            <option value="0">全部帧 (完整序列)</option>
+            <option value="300">前 300 帧 (大场景)</option>
+            <option value="600">前 600 帧 (超长序列)</option>
           </select>
           <select id="stream-frame-stride">
             <option value="1" selected>Stride 1 (逐帧)</option>
@@ -702,8 +703,9 @@
       }
 
       const geometry = new THREE.BufferGeometry();
-      const posBuffer = new Float32Array(MAX_POINTS * 3);
-      const colBuffer = new Float32Array(MAX_POINTS * 3);
+      const initialCapacity = 2000000;
+      const posBuffer = new Float32Array(initialCapacity * 3);
+      const colBuffer = new Float32Array(initialCapacity * 3);
 
       geometry.setAttribute('position', new THREE.BufferAttribute(posBuffer, 3));
       geometry.setAttribute('color', new THREE.BufferAttribute(colBuffer, 3));
@@ -727,7 +729,7 @@
       const dedupMode = document.getElementById('dedup-mode').value;
 
       if (dedupMode === 'none') {
-        // 🌟 1:1 全精细无去重模式：保留全部 529,200 个空间点，与离线 PLY 100% 相同
+        // 🌟 1:1 全精细无去重模式：完整保留全部空间点，与离线 PLY 100% 一致
         for (let i = 0; i < newPoints.length; i++) {
           allPositions.push(newPoints[i][0], newPoints[i][1], newPoints[i][2]);
           allColors.push(newColors[i][0] / 255.0, newColors[i][1] / 255.0, newColors[i][2] / 255.0);
@@ -750,19 +752,31 @@
           }
         }
       }
-      // 更新 GPU 显存缓冲区
+
+      // 动态自动扩容 GPU 显存缓冲区
       const totalPoints = allPositions.length / 3;
       const geo = pointCloudMesh.geometry;
-      const posAttr = geo.attributes.position;
-      const colAttr = geo.attributes.color;
+      let posAttr = geo.attributes.position;
+      let colAttr = geo.attributes.color;
 
-      if (totalPoints < MAX_POINTS) {
+      if (posAttr.array.length < allPositions.length) {
+        const newCapacity = Math.max(allPositions.length * 2, 6000000);
+        const newPosBuf = new Float32Array(newCapacity);
+        const newColBuf = new Float32Array(newCapacity);
+        newPosBuf.set(allPositions);
+        newColBuf.set(allColors);
+        geo.setAttribute('position', new THREE.BufferAttribute(newPosBuf, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(newColBuf, 3));
+        posAttr = geo.attributes.position;
+        colAttr = geo.attributes.color;
+      } else {
         posAttr.copyArray(allPositions);
         colAttr.copyArray(allColors);
-        posAttr.needsUpdate = true;
-        colAttr.needsUpdate = true;
-        geo.setDrawRange(0, totalPoints);
       }
+
+      posAttr.needsUpdate = true;
+      colAttr.needsUpdate = true;
+      geo.setDrawRange(0, totalPoints);
 
       geo.computeBoundingBox();
       originalBBox = geo.boundingBox;
@@ -1110,6 +1124,20 @@
       const v = parseFloat(e.target.value);
       document.getElementById('voxel-size-val').innerText = `${(v * 100).toFixed(1)} cm`;
     });
+    function updateStreamButtonLabel() {
+      const maxFrames = parseInt(document.getElementById('stream-max-frames').value, 10);
+      const btn = document.getElementById('btn-stream-toggle');
+      if (!isStreaming) {
+        if (maxFrames === 0) {
+          btn.innerText = `▶️ 启动实时流式建图 (全部完整视频流)`;
+        } else {
+          btn.innerText = `▶️ 启动实时流式建图 (前 ${maxFrames} 帧)`;
+        }
+      }
+    }
+
+    document.getElementById('stream-sequence-select').addEventListener('change', updateStreamButtonLabel);
+    document.getElementById('stream-max-frames').addEventListener('change', updateStreamButtonLabel);
 
     document.getElementById('model-select').addEventListener('change', (e) => {
       loadPLYFromUrl(e.target.value);
@@ -1204,9 +1232,9 @@
               opt.innerText = `${item.name}`;
               sel.appendChild(opt);
             });
+            updateStreamButtonLabel();
           }
         })
-        .catch(err => console.warn("Failed to load sequences list:", err));
     };
   </script>
 </body>
