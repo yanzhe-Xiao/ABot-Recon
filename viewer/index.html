@@ -290,12 +290,14 @@
       border: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    /* 实时 2D 摄像头小视窗 (HUD - 左下角) */
+    /* 实时 2D 摄像头小视窗 (HUD - 严格固定于左下角) */
     .camera-hud {
-      position: absolute;
-      bottom: 20px;
-      left: 20px;
-      z-index: 10;
+      position: fixed !important;
+      bottom: 20px !important;
+      left: 20px !important;
+      right: auto !important;
+      top: auto !important;
+      z-index: 1000 !important;
       background: var(--panel-bg);
       backdrop-filter: blur(14px);
       border: 1px solid var(--panel-border);
@@ -327,12 +329,12 @@
       display: block;
     }
 
-    /* 操作提示栏 (底部紧随 HUD 右侧) */
+    /* 操作提示栏 (位于 HUD 右侧紧邻显示) */
     .help-bar {
-      position: absolute;
-      bottom: 20px;
-      left: 285px;
-      z-index: 10;
+      position: fixed !important;
+      bottom: 20px !important;
+      left: 285px !important;
+      z-index: 900 !important;
       background: var(--panel-bg);
       backdrop-filter: blur(14px);
       padding: 8px 16px;
@@ -413,13 +415,45 @@
       <div class="section-title" style="color:#f87171; border-color:rgba(239,68,68,0.2);">
         <span>🔴 实时视频流建图 (Live Stream)</span>
       </div>
+
       <div class="control-group">
-        <button class="btn-stream" id="btn-stream-toggle">▶️ 启动实时流式建图 (60 帧)</button>
+        <label style="font-size:12px; color:var(--text-muted);">📹 选择视频流序列 (Video Sequence)</label>
+        <select id="stream-sequence-select">
+          <option value="examples/images">🎬 快速演示序列 (Demo Sample - 60 帧)</option>
+          <option value="data/tum/rgbd_dataset_freiburg1_desk/rgb">🖥️ TUM 办公桌面全景 (Desk - 613 帧)</option>
+          <option value="data/tum/rgbd_dataset_freiburg1_xyz/rgb">📐 TUM 空间平移序列 (XYZ - 798 帧)</option>
+          <option value="data/tum/rgbd_dataset_freiburg1_360/rgb">🔄 TUM 360度环绕回环 (360 Loop - 756 帧)</option>
+          <option value="data/tum/rgbd_dataset_freiburg1_room/rgb">🏢 TUM 完整大房间场景 (Room - 1362 帧)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <div class="control-row">
+          <label style="font-size:12px; color:var(--text-muted);">⏱️ 帧数限制</label>
+          <label style="font-size:12px; color:var(--text-muted);">⏩ 抽帧步长</label>
+        </div>
+        <div class="btn-group">
+          <select id="stream-max-frames">
+            <option value="60" selected>前 60 帧 (极速体验)</option>
+            <option value="120">前 120 帧 (平滑长程)</option>
+            <option value="250">前 250 帧 (宏大场景)</option>
+            <option value="0">全部帧 (完整序列)</option>
+          </select>
+          <select id="stream-frame-stride">
+            <option value="1" selected>Stride 1 (逐帧)</option>
+            <option value="2">Stride 2 (2x加速)</option>
+            <option value="3">Stride 3 (3x加速)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="control-group" style="margin-top:4px;">
+        <button class="btn-stream" id="btn-stream-toggle">▶️ 启动实时流式建图</button>
       </div>
 
       <div class="control-group" style="margin-top:2px;">
         <div class="control-row">
-          <span style="font-size:12px; color:var(--text-muted);" id="stream-progress-text">就绪: 0 / 60 帧</span>
+          <span style="font-size:12px; color:var(--text-muted);" id="stream-progress-text">就绪: 点击启动</span>
           <span class="val" id="stream-fps-text" style="color:#f87171;">0.0 FPS</span>
         </div>
         <div class="progress-bar-container">
@@ -430,7 +464,7 @@
       <div class="control-group">
         <label style="font-size:12px; color:var(--text-muted);">建图精度 / 去重模式</label>
         <select id="dedup-mode">
-          <option value="none" selected>🌟 1:1 全精细模式 (52.9万点，与 PLY 完全一致)</option>
+          <option value="none" selected>🌟 1:1 全精细模式 (致密高清，与 PLY 100% 一致)</option>
           <option value="voxel">⚡ 空间体素去重模式 (轻量精简)</option>
         </select>
       </div>
@@ -442,7 +476,7 @@
         </div>
         <input type="range" id="voxel-size" min="0.002" max="0.02" step="0.001" value="0.005">
       </div>
-
+    </div>
     <!-- 离线点云数据源切换 -->
     <div class="panel-section">
       <div class="section-title">离线对比数据源</div>
@@ -771,9 +805,12 @@
       document.getElementById('live-indicator').style.display = 'inline-block';
       liveCameraFrustum.visible = true;
 
+      const seq = document.getElementById('stream-sequence-select').value;
+      const maxFrames = document.getElementById('stream-max-frames').value;
+      const frameStride = document.getElementById('stream-frame-stride').value;
       const confThresh = 0.1;
       const pointStride = 4;
-      const url = `/api/stream?point_stride=${pointStride}&confidence_threshold=${confThresh}&stride=1`;
+      const url = `/api/stream?sequence=${encodeURIComponent(seq)}&max_frames=${maxFrames}&stride=${frameStride}&point_stride=${pointStride}&confidence_threshold=${confThresh}`;
 
       eventSource = new EventSource(url);
 
@@ -1147,13 +1184,27 @@
         frameCount = 0;
         lastFpsTime = time;
       }
-    }
-
-    // --- 启动时初始化 ---
     window.onload = () => {
       initScene();
       animate(performance.now());
       hideLoading();
+
+      // 动态获取并加载服务端所有视频流序列
+      fetch('/api/sequences')
+        .then(r => r.json())
+        .then(seqs => {
+          if (seqs && seqs.length > 0) {
+            const sel = document.getElementById('stream-sequence-select');
+            sel.innerHTML = '';
+            seqs.forEach(item => {
+              const opt = document.createElement('option');
+              opt.value = item.id;
+              opt.innerText = `${item.name}`;
+              sel.appendChild(opt);
+            });
+          }
+        })
+        .catch(err => console.warn("Failed to load sequences list:", err));
     };
   </script>
 </body>

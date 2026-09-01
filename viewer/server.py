@@ -64,11 +64,72 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/stream":
             return self.handle_sse_stream(parsed_url.query)
 
+        if path == "/api/sequences":
+            return self.handle_sequences()
+
         if path == "/api/status":
             return self.handle_status()
 
         return super().do_GET()
 
+    def handle_sequences(self) -> None:
+        """Scan and list all available video datasets and image sequences."""
+        sequences = []
+
+        # Predefined sequence registry with friendly names
+        registry = [
+            {
+                "id": "examples/images",
+                "name": "🎬 快速演示序列 (Demo Sample)",
+                "path": "examples/images",
+                "description": "TUM 办公桌局部平移 (60 帧快速体验)"
+            },
+            {
+                "id": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
+                "name": "🖥️ TUM 办公桌面全景 (Desk Sequence)",
+                "path": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
+                "description": "办公桌全景、电脑显示器、键盘、书籍 (613 帧)"
+            },
+            {
+                "id": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
+                "name": "📐 TUM 空间平移序列 (XYZ Motion)",
+                "path": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
+                "description": "沿 X/Y/Z 三轴典型平移扫描 (798 帧)"
+            },
+            {
+                "id": "data/tum/rgbd_dataset_freiburg1_360/rgb",
+                "name": "🔄 TUM 360度环绕回环 (360 Loop)",
+                "path": "data/tum/rgbd_dataset_freiburg1_360/rgb",
+                "description": "绕桌面 360 度环绕拍摄，经典回环场景 (756 帧)"
+            },
+            {
+                "id": "data/tum/rgbd_dataset_freiburg1_room/rgb",
+                "name": "🏢 TUM 完整大房间场景 (Full Room)",
+                "path": "data/tum/rgbd_dataset_freiburg1_room/rgb",
+                "description": "完整办公室大场景、多张桌椅、黑板 (1362 帧)"
+            },
+        ]
+
+        for item in registry:
+            seq_dir = ROOT_DIR / item["path"]
+            if seq_dir.is_dir():
+                frames = len([
+                    p for p in seq_dir.iterdir()
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+                ])
+                if frames > 0:
+                    sequences.append({
+                        "id": item["id"],
+                        "name": f"{item['name']} - {frames} 帧",
+                        "path": item["path"],
+                        "frames": frames,
+                        "description": item["description"],
+                    })
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(sequences, ensure_ascii=False).encode("utf-8"))
     def handle_status(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -86,7 +147,8 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         point_stride = int(params.get("point_stride", ["4"])[0])
         conf_thresh = float(params.get("confidence_threshold", ["0.1"])[0])
         frame_stride = int(params.get("stride", ["1"])[0])
-        image_dir_name = params.get("image_dir", ["examples/images"])[0]
+        image_dir_name = params.get("sequence", [params.get("image_dir", ["examples/images"])[0]])[0]
+        max_frames = int(params.get("max_frames", ["0"])[0])
 
         image_dir = ROOT_DIR / image_dir_name
         if not image_dir.is_dir():
@@ -98,12 +160,14 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
         )[::frame_stride]
 
+        if max_frames > 0:
+            image_paths = image_paths[:max_frames]
+
         if not image_paths:
             self.send_error(404, "No image frames found in directory")
             return
 
-        print(f"[Streaming Server] Starting SSE stream for client ({len(image_paths)} frames)...", flush=True)
-
+        print(f"[Streaming Server] Starting SSE stream: {image_dir_name} ({len(image_paths)} frames, stride={frame_stride})...", flush=True)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache, no-transform")
