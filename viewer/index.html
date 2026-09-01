@@ -3,16 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ABot-Recon 3D 点云交互式可视化系统</title>
+  <title>ABot-Recon 3D 实时流式建图与点云交互可视化系统</title>
   <style>
     :root {
-      --bg-color: #0f1117;
-      --panel-bg: rgba(22, 27, 34, 0.85);
+      --bg-color: #0d1117;
+      --panel-bg: rgba(22, 27, 34, 0.88);
       --panel-border: rgba(255, 255, 255, 0.12);
       --accent-color: #3b82f6;
       --accent-hover: #60a5fa;
+      --accent-live: #ef4444;
+      --accent-live-bg: rgba(239, 68, 68, 0.2);
       --text-main: #f3f4f6;
       --text-muted: #9ca3af;
+      --success: #10b981;
     }
 
     * {
@@ -48,20 +51,20 @@
       z-index: 10;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 14px;
       background: var(--panel-bg);
-      backdrop-filter: blur(12px);
-      padding: 10px 18px;
+      backdrop-filter: blur(14px);
+      padding: 10px 20px;
       border-radius: 12px;
       border: 1px solid var(--panel-border);
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     }
 
     .top-bar h1 {
       font-size: 16px;
-      font-weight: 600;
+      font-weight: 700;
       letter-spacing: 0.5px;
-      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      background: linear-gradient(135deg, #60a5fa, #c084fc);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -73,6 +76,25 @@
       color: #93c5fd;
       border: 1px solid rgba(59, 130, 246, 0.3);
       border-radius: 6px;
+      font-weight: 600;
+    }
+
+    .badge-live {
+      display: none;
+      font-size: 11px;
+      padding: 3px 10px;
+      background: var(--accent-live-bg);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      border-radius: 6px;
+      font-weight: 700;
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.6; }
+      50% { opacity: 1; }
+      100% { opacity: 0.6; }
     }
 
     /* 侧边控制面板 */
@@ -80,16 +102,16 @@
       position: absolute;
       top: 16px;
       right: 20px;
-      width: 320px;
+      width: 340px;
       max-height: calc(100vh - 32px);
       overflow-y: auto;
       z-index: 10;
       background: var(--panel-bg);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(14px);
       border-radius: 14px;
       border: 1px solid var(--panel-border);
       padding: 18px;
-      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.45);
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -117,6 +139,9 @@
       font-weight: 700;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       padding-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
 
     .control-group {
@@ -146,7 +171,7 @@
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--panel-border);
       color: var(--text-main);
-      padding: 7px 12px;
+      padding: 8px 12px;
       border-radius: 8px;
       font-size: 13px;
       outline: none;
@@ -189,12 +214,45 @@
     button.btn-primary {
       background: var(--accent-color);
       color: white;
-      font-weight: 500;
+      font-weight: 600;
       border: none;
     }
 
     button.btn-primary:hover {
       background: var(--accent-hover);
+    }
+
+    button.btn-stream {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      color: white;
+      font-weight: 700;
+      border: none;
+      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35);
+    }
+
+    button.btn-stream:hover {
+      filter: brightness(1.1);
+    }
+
+    button.btn-stream.running {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+
+    /* 进度条 */
+    .progress-bar-container {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #3b82f6, #10b981);
+      transition: width 0.1s ease;
     }
 
     /* 快捷视角按钮 */
@@ -220,7 +278,7 @@
 
     /* 底部统计信息 */
     .stats-card {
-      background: rgba(0, 0, 0, 0.3);
+      background: rgba(0, 0, 0, 0.35);
       padding: 10px;
       border-radius: 8px;
       font-size: 12px;
@@ -229,17 +287,54 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    /* 操作提示栏 (底部) */
+    /* 实时 2D 摄像头小视窗 (HUD) */
+    .camera-hud {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      overflow: hidden;
+      width: 240px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      transition: all 0.3s ease;
+    }
+
+    .camera-hud-header {
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: rgba(0, 0, 0, 0.3);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .camera-hud img {
+      width: 100%;
+      height: 135px;
+      object-fit: cover;
+      background: #000;
+      display: block;
+    }
+
+    /* 操作提示栏 (底部左侧) */
     .help-bar {
       position: absolute;
       bottom: 20px;
       left: 20px;
       z-index: 10;
       background: var(--panel-bg);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(14px);
       padding: 8px 16px;
       border-radius: 10px;
       border: 1px solid var(--panel-border);
@@ -267,7 +362,7 @@
       left: 0;
       width: 100%;
       height: 100%;
-      background: rgba(15, 17, 23, 0.85);
+      background: rgba(13, 17, 23, 0.85);
       backdrop-filter: blur(8px);
       z-index: 100;
       display: flex;
@@ -297,7 +392,7 @@
       letter-spacing: 0.5px;
     }
   </style>
-  <!-- Three.js 与 OrbitControls (本地优先) -->
+  <!-- Three.js 与 OrbitControls (本地加载) -->
   <script src="/viewer/libs/three.min.js"></script>
   <script src="/viewer/libs/OrbitControls.js"></script>
 </head>
@@ -307,27 +402,58 @@
 
   <!-- 顶部状态栏 -->
   <div class="top-bar">
-    <h1>ABot-Recon 3D 浏览器</h1>
-    <span class="badge" id="backend-badge">WebGL 2.0</span>
+    <h1>ABot-Recon 3D 实时流式建图系统</h1>
+    <span class="badge" id="backend-badge">FlashInfer Paged KV</span>
+    <span class="badge-live" id="live-indicator">● LIVE STREAMING</span>
   </div>
 
   <!-- 侧边交互控制器 -->
   <div class="control-panel">
-    <div class="panel-section">
-      <div class="section-title">点云数据源</div>
+    
+    <!-- 实时流式建图模块 -->
+    <div class="panel-section" style="border: 1px solid rgba(239, 68, 68, 0.3); padding: 12px; border-radius: 10px; background: rgba(239, 68, 68, 0.05);">
+      <div class="section-title" style="color:#f87171; border-color:rgba(239,68,68,0.2);">
+        <span>🔴 实时视频流建图 (Live Stream)</span>
+      </div>
       <div class="control-group">
-        <label for="model-select" style="font-size:12px; color:var(--text-muted);">选择预设重建结果</label>
+        <button class="btn-stream" id="btn-stream-toggle">▶️ 启动实时流式建图 (60 帧)</button>
+      </div>
+
+      <div class="control-group" style="margin-top:2px;">
+        <div class="control-row">
+          <span style="font-size:12px; color:var(--text-muted);" id="stream-progress-text">就绪: 0 / 60 帧</span>
+          <span class="val" id="stream-fps-text" style="color:#f87171;">0.0 FPS</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="stream-progress-fill"></div>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="control-row">
+          <label for="voxel-size" style="font-size:12px;">体素去重 (Voxel Grid)</label>
+          <span class="val" id="voxel-size-val">1.0 cm</span>
+        </div>
+        <input type="range" id="voxel-size" min="0.005" max="0.04" step="0.005" value="0.01">
+        <span style="font-size:11px; color:#9ca3af;">自动合并空间重叠点，杜绝暴力堆叠与显存暴增</span>
+      </div>
+    </div>
+
+    <!-- 离线点云数据源切换 -->
+    <div class="panel-section">
+      <div class="section-title">离线对比数据源</div>
+      <div class="control-group">
         <select id="model-select">
           <option value="/outputs/demo_loop/reconstruction.ply">✨ 回环优化结果 (Loop Closure)</option>
           <option value="/outputs/demo_noloop/reconstruction.ply">🚀 流式原始预测 (No Loop)</option>
         </select>
       </div>
       <div class="control-group">
-        <label style="font-size:12px; color:var(--text-muted);">或上传本地 PLY 文件</label>
         <input type="file" id="file-input" accept=".ply">
       </div>
     </div>
 
+    <!-- 渲染控制 -->
     <div class="panel-section">
       <div class="section-title">渲染控制</div>
       
@@ -344,20 +470,13 @@
         <select id="color-mode">
           <option value="rgb">🎨 原始 RGB 真彩色</option>
           <option value="height">🌈 高度渐变 (Z-Height)</option>
-          <option value="depth">🌐 景深渐变 (Depth Map)</option>
-          <option value="intensity">⚡ 强度/单色 (Solid Light)</option>
+          <option value="depth">🌐 景深距离 (Depth Map)</option>
+          <option value="intensity">⚡ 单色增强 (Solid Light)</option>
         </select>
-      </div>
-
-      <div class="control-group">
-        <div class="control-row">
-          <label for="sampling-rate">点云下采样</label>
-          <span class="val" id="sampling-val">100%</span>
-        </div>
-        <input type="range" id="sampling-rate" min="10" max="100" step="10" value="100">
       </div>
     </div>
 
+    <!-- 视角与辅助开关 -->
     <div class="panel-section">
       <div class="section-title">视角与辅助</div>
       <div class="btn-group-3">
@@ -365,9 +484,13 @@
         <button class="view-btn" id="btn-view-top">俯视 (Top)</button>
         <button class="view-btn" id="btn-view-side">侧视 (Side)</button>
       </div>
-      <button class="view-btn" id="btn-view-reset" style="margin-top:2px;">🔄 重置默认视角</button>
+      <button class="view-btn" id="btn-view-reset" style="margin-top:2px;">🔄 重置对焦视角</button>
 
       <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+        <label class="checkbox-row">
+          <input type="checkbox" id="chk-follow-camera" checked>
+          <span>实时跟踪当前相机视锥体</span>
+        </label>
         <label class="checkbox-row">
           <input type="checkbox" id="chk-trajectory" checked>
           <span>显示相机位姿轨迹 (Trajectory)</span>
@@ -380,23 +503,32 @@
           <input type="checkbox" id="chk-grid" checked>
           <span>显示参考地网 (Ground Grid)</span>
         </label>
-        <label class="checkbox-row">
-          <input type="checkbox" id="chk-autorotate">
-          <span>自动平滑旋转展示</span>
-        </label>
       </div>
     </div>
 
+    <!-- 统计信息与导出 -->
     <div class="panel-section">
-      <div class="section-title">模型统计信息</div>
+      <div class="section-title">实时建图统计</div>
       <div class="stats-card">
-        <div>点云数量: <span id="stat-points" style="color:#fff;">0</span></div>
+        <div>全局点云数: <span id="stat-points" style="color:#fff; font-weight:bold;">0</span></div>
+        <div>单帧延迟: <span id="stat-latency" style="color:#10b981;">0.0 ms</span></div>
         <div>包围盒尺寸: <span id="stat-bbox" style="color:#fff;">0 × 0 × 0 m</span></div>
-        <div>中心坐标: <span id="stat-center" style="color:#fff;">(0, 0, 0)</span></div>
         <div>渲染帧率: <span id="stat-fps" style="color:#10b981;">60 FPS</span></div>
       </div>
-      <button class="btn-primary" id="btn-screenshot" style="margin-top:4px;">📸 导出当前高清截图</button>
+      <div class="btn-group" style="margin-top:4px;">
+        <button class="btn-primary" id="btn-export-ply">💾 导出当前 PLY</button>
+        <button id="btn-screenshot">📸 视角截图</button>
+      </div>
     </div>
+  </div>
+
+  <!-- 实时 2D 摄像头 HUD -->
+  <div class="camera-hud" id="camera-hud">
+    <div class="camera-hud-header">
+      <span>📷 实时输入视频流</span>
+      <span id="hud-frame-tag">000000.png</span>
+    </div>
+    <img id="hud-img" src="/examples/images/000000.png" alt="Live Camera Feed">
   </div>
 
   <!-- 底部操作快捷指南 -->
@@ -410,7 +542,7 @@
   <!-- 加载遮罩 -->
   <div id="loading-overlay">
     <div class="spinner"></div>
-    <div id="loading-text">正在加载 3D 点云数据...</div>
+    <div id="loading-text">正在初始化 3D 渲染引擎...</div>
   </div>
 
   <script>
@@ -418,10 +550,20 @@
     let scene, camera, renderer, controls;
     let pointCloudMesh = null;
     let trajectoryGroup = new THREE.Group();
+    let liveCameraFrustum = null;
+    let trajectoryPoints = [];
+    let trajectoryLine = null;
     let axesHelper, gridHelper;
-    let rawPositions = null, rawColors = null;
     let originalBBox = null;
     let frameCount = 0, lastFpsTime = performance.now();
+
+    // 实时流式建图状态与体素去重缓存
+    let eventSource = null;
+    let isStreaming = false;
+    let voxelMap = new Map(); // 空间体素网格: key -> {x, y, z, r, g, b}
+    let allPositions = [];
+    let allColors = [];
+    const MAX_POINTS = 2000000;
 
     const container = document.getElementById('canvas-container');
     const loadingOverlay = document.getElementById('loading-overlay');
@@ -429,7 +571,7 @@
 
     function initScene() {
       scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0f1117);
+      scene.background = new THREE.Color(0x0d1117);
 
       camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1000);
       camera.position.set(0.5, -0.8, -0.8);
@@ -445,18 +587,31 @@
       controls.dampingFactor = 0.05;
       controls.screenSpacePanning = true;
 
-      // 坐标轴辅助 (X: 红, Y: 绿, Z: 蓝)
+      // 坐标轴辅助
       axesHelper = new THREE.AxesHelper(0.3);
       scene.add(axesHelper);
 
-      // 地面网格辅助
+      // 地面参考网格
       gridHelper = new THREE.GridHelper(4, 40, 0x3b82f6, 0x1f2937);
       gridHelper.position.y = 0.5;
       scene.add(gridHelper);
 
       scene.add(trajectoryGroup);
 
-      // 光照 (辅助材质)
+      // 初始化当前实时相机视锥体 (金色高亮)
+      liveCameraFrustum = createCameraFrustum(0.05, 0xf59e0b);
+      liveCameraFrustum.visible = false;
+      scene.add(liveCameraFrustum);
+
+      // 初始化轨迹线
+      const lineGeo = new THREE.BufferGeometry();
+      const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
+      trajectoryLine = new THREE.Line(lineGeo, lineMat);
+      trajectoryGroup.add(trajectoryLine);
+
+      // 初始化动态点云几何体 (预分配缓冲区)
+      initDynamicPointCloud();
+
       const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
       scene.add(ambientLight);
 
@@ -477,20 +632,234 @@
       if (e.key === 's' || e.key === 'S') setSideView();
     }
 
+    // --- 相机视锥体模型生成 ---
+    function createCameraFrustum(scale = 0.035, color = 0x38bdf8) {
+      const group = new THREE.Group();
+      const w = scale * 0.8, h = scale * 0.5, d = scale * 1.2;
+      const vertices = new Float32Array([
+        0, 0, 0,  -w, -h, d,
+        0, 0, 0,   w, -h, d,
+        0, 0, 0,   w,  h, d,
+        0, 0, 0,  -w,  h, d,
+        -w, -h, d,  w, -h, d,
+         w, -h, d,  w,  h, d,
+         w,  h, d, -w,  h, d,
+        -w,  h, d, -w, -h, d,
+        0, -h * 1.3, d,  -w * 0.4, -h, d,
+        0, -h * 1.3, d,   w * 0.4, -h, d
+      ]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+      const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 1.5 });
+      group.add(new THREE.LineSegments(geo, mat));
+      return group;
+    }
+
+    // --- 动态增量点云几何体初始化 ---
+    function initDynamicPointCloud() {
+      if (pointCloudMesh) {
+        scene.remove(pointCloudMesh);
+        pointCloudMesh.geometry.dispose();
+        pointCloudMesh.material.dispose();
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      const posBuffer = new Float32Array(MAX_POINTS * 3);
+      const colBuffer = new Float32Array(MAX_POINTS * 3);
+
+      geometry.setAttribute('position', new THREE.BufferAttribute(posBuffer, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colBuffer, 3));
+      geometry.setDrawRange(0, 0);
+
+      const size = parseFloat(document.getElementById('point-size').value);
+      const material = new THREE.PointsMaterial({
+        size: size,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.95
+      });
+
+      pointCloudMesh = new THREE.Points(geometry, material);
+      scene.add(pointCloudMesh);
+    }
+
+    // --- 空间体素去重与增量点云追加 ---
+    function appendPointsWithVoxelGrid(newPoints, newColors) {
+      const voxelSize = parseFloat(document.getElementById('voxel-size').value);
+      const invVoxel = 1.0 / voxelSize;
+
+      let addedCount = 0;
+      for (let i = 0; i < newPoints.length; i++) {
+        const x = newPoints[i][0];
+        const y = newPoints[i][1];
+        const z = newPoints[i][2];
+
+        // 计算空间体素三维网格索引
+        const vx = Math.round(x * invVoxel);
+        const vy = Math.round(y * invVoxel);
+        const vz = Math.round(z * invVoxel);
+        const key = `${vx}_${vy}_${vz}`;
+
+        const r = newColors[i][0] / 255.0;
+        const g = newColors[i][1] / 255.0;
+        const b = newColors[i][2] / 255.0;
+
+        if (!voxelMap.has(key)) {
+          voxelMap.set(key, { x, y, z, r, g, b });
+          allPositions.push(x, y, z);
+          allColors.push(r, g, b);
+          addedCount++;
+        }
+      }
+
+      // 更新 GPU 显存缓冲区
+      const totalPoints = allPositions.length / 3;
+      const geo = pointCloudMesh.geometry;
+      const posAttr = geo.attributes.position;
+      const colAttr = geo.attributes.color;
+
+      if (totalPoints < MAX_POINTS) {
+        posAttr.copyArray(allPositions);
+        colAttr.copyArray(allColors);
+        posAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        geo.setDrawRange(0, totalPoints);
+      }
+
+      geo.computeBoundingBox();
+      originalBBox = geo.boundingBox;
+
+      // 更新统计数据
+      document.getElementById('stat-points').innerText = totalPoints.toLocaleString();
+      if (originalBBox) {
+        const dim = new THREE.Vector3();
+        originalBBox.getSize(dim);
+        document.getElementById('stat-bbox').innerText = `${dim.x.toFixed(2)} × ${dim.y.toFixed(2)} × ${dim.z.toFixed(2)} m`;
+        gridHelper.position.y = originalBBox.max.y + 0.1;
+      }
+    }
+
+    // --- 实时流式通信与渲染主逻辑 (SSE) ---
+    function startLiveStream() {
+      if (isStreaming) {
+        stopLiveStream();
+        return;
+      }
+
+      // 重置所有实时建图缓存
+      voxelMap.clear();
+      allPositions = [];
+      allColors = [];
+      trajectoryPoints = [];
+      trajectoryGroup.clear();
+      trajectoryGroup.add(trajectoryLine);
+      initDynamicPointCloud();
+
+      isStreaming = true;
+      const btn = document.getElementById('btn-stream-toggle');
+      btn.innerText = '⏹️ 停止实时建图';
+      btn.classList.add('running');
+      document.getElementById('live-indicator').style.display = 'inline-block';
+      liveCameraFrustum.visible = true;
+
+      const confThresh = 0.1;
+      const pointStride = 4;
+      const url = `/api/stream?point_stride=${pointStride}&confidence_threshold=${confThresh}&stride=1`;
+
+      eventSource = new EventSource(url);
+
+      eventSource.addEventListener('start', (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('stream-progress-text').innerText = `建图中: 0 / ${data.total_frames} 帧`;
+      });
+
+      eventSource.addEventListener('frame', (e) => {
+        const data = JSON.parse(e.data);
+
+        // 1. 更新 2D HUD 相机视图
+        document.getElementById('hud-img').src = data.image_url;
+        document.getElementById('hud-frame-tag').innerText = `帧 #${data.frame_index + 1} (${data.point_count} 点)`;
+
+        // 2. 更新相机位姿与视锥体
+        const p = data.camera_pose;
+        const mat = new THREE.Matrix4().set(
+          p[0][0], p[0][1], p[0][2], p[0][3],
+          p[1][0], p[1][1], p[1][2], p[1][3],
+          p[2][0], p[2][1], p[2][2], p[2][3],
+          0, 0, 0, 1
+        );
+        liveCameraFrustum.matrixAutoUpdate = false;
+        liveCameraFrustum.matrix.copy(mat);
+
+        const currentPos = new THREE.Vector3(p[0][3], p[1][3], p[2][3]);
+        trajectoryPoints.push(currentPos);
+
+        // 添加关键帧静态视锥标记
+        if (data.frame_index % 3 === 0 || data.frame_index === data.total_frames - 1) {
+          const frustum = createCameraFrustum(0.035, 0x38bdf8);
+          frustum.matrixAutoUpdate = false;
+          frustum.matrix.copy(mat);
+          trajectoryGroup.add(frustum);
+        }
+
+        // 更新轨迹路径
+        trajectoryLine.geometry.setFromPoints(trajectoryPoints);
+        trajectoryLine.geometry.attributes.position.needsUpdate = true;
+
+        // 3. 追加当前帧点云（通过空间体素去重）
+        appendPointsWithVoxelGrid(data.points_xyz, data.points_rgb);
+
+        // 4. 视角平滑跟随机位姿 (若开启)
+        if (document.getElementById('chk-follow-camera').checked) {
+          controls.target.lerp(currentPos, 0.2);
+        }
+
+        // 5. 更新进度与性能指标
+        const progress = ((data.frame_index + 1) / data.total_frames) * 100;
+        document.getElementById('stream-progress-fill').style.width = `${progress}%`;
+        document.getElementById('stream-progress-text').innerText = `建图中: ${data.frame_index + 1} / ${data.total_frames} 帧`;
+        document.getElementById('stream-fps-text').innerText = `${data.fps.toFixed(1)} FPS`;
+        document.getElementById('stat-latency').innerText = `${data.latency_ms} ms (${data.fps.toFixed(1)} FPS)`;
+      });
+
+      eventSource.addEventListener('complete', (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('stream-progress-text').innerText = `✅ 建图完成: ${data.total_frames} 帧全部处理`;
+        stopLiveStream();
+        resetView();
+      });
+
+      eventSource.onerror = (err) => {
+        console.warn("SSE stream error:", err);
+        stopLiveStream();
+      };
+    }
+
+    function stopLiveStream() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      isStreaming = false;
+      const btn = document.getElementById('btn-stream-toggle');
+      btn.innerText = '▶️ 启动实时流式建图 (60 帧)';
+      btn.classList.remove('running');
+      document.getElementById('live-indicator').style.display = 'none';
+    }
+
     // --- 高性能原生二进制 PLY 解析器 ---
     function parseBinaryPLY(buffer) {
       const headerText = new TextDecoder('latin1').decode(new Uint8Array(buffer, 0, Math.min(2048, buffer.byteLength)));
       const headerEndIndex = headerText.indexOf('end_header\n');
-      if (headerEndIndex === -1) {
-        throw new Error("无法解析 PLY 文件头: 未找到 end_header");
-      }
+      if (headerEndIndex === -1) throw new Error("无法解析 PLY 文件头: 未找到 end_header");
 
       const header = headerText.slice(0, headerEndIndex);
       const lines = header.split('\n');
       let vertexCount = 0;
       let properties = [];
-
       let inVertex = false;
+
       for (const line of lines) {
         const parts = line.trim().split(/\s+/);
         if (parts[0] === 'element' && parts[1] === 'vertex') {
@@ -509,7 +878,6 @@
       const positions = new Float32Array(vertexCount * 3);
       const colors = new Float32Array(vertexCount * 3);
 
-      // 计算每个顶点的步长
       let stride = 0;
       let xOff = -1, yOff = -1, zOff = -1;
       let rOff = -1, gOff = -1, bOff = -1;
@@ -541,9 +909,7 @@
           colors[pIdx + 1] = dataView.getUint8(offset + gOff) / 255.0;
           colors[pIdx + 2] = dataView.getUint8(offset + bOff) / 255.0;
         } else {
-          colors[pIdx] = 0.8;
-          colors[pIdx + 1] = 0.8;
-          colors[pIdx + 2] = 0.8;
+          colors[pIdx] = 0.8; colors[pIdx + 1] = 0.8; colors[pIdx + 2] = 0.8;
         }
         offset += stride;
       }
@@ -551,128 +917,9 @@
       return { positions, colors, vertexCount };
     }
 
-    // --- 构建点云几何对象 ---
-    function buildPointCloud(positions, colors) {
-      if (pointCloudMesh) {
-        scene.remove(pointCloudMesh);
-        pointCloudMesh.geometry.dispose();
-        pointCloudMesh.material.dispose();
-      }
-
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-      geometry.computeBoundingBox();
-      originalBBox = geometry.boundingBox;
-
-      const size = parseFloat(document.getElementById('point-size').value);
-      const material = new THREE.PointsMaterial({
-        size: size,
-        vertexColors: true,
-        sizeAttenuation: true,
-        transparent: true,
-        opacity: 0.95
-      });
-
-      pointCloudMesh = new THREE.Points(geometry, material);
-      scene.add(pointCloudMesh);
-
-      // 更新统计信息
-      document.getElementById('stat-points').innerText = (positions.length / 3).toLocaleString();
-      const center = new THREE.Vector3();
-      originalBBox.getCenter(center);
-      const dimensions = new THREE.Vector3();
-      originalBBox.getSize(dimensions);
-
-      document.getElementById('stat-bbox').innerText = `${dimensions.x.toFixed(2)} × ${dimensions.y.toFixed(2)} × ${dimensions.z.toFixed(2)} m`;
-      document.getElementById('stat-center').innerText = `(${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)})`;
-
-      gridHelper.position.y = originalBBox.max.y + 0.1;
-      applyColorMode();
-    }
-
-    // --- 加载相机轨迹可视化 ---
-    function parseNpy(buffer) {
-      const u8 = new Uint8Array(buffer);
-      if (u8[0] !== 0x93 || u8[1] !== 0x4E || u8[2] !== 0x55 || u8[3] !== 0x4D || u8[4] !== 0x50 || u8[5] !== 0x59) {
-        throw new Error("Invalid NPY format");
-      }
-      const major = u8[6];
-      let offset = 10 + (u8[8] | (u8[9] << 8));
-      if (major >= 2) {
-        offset = 12 + (u8[8] | (u8[9] << 8) | (u8[10] << 16) | (u8[11] << 24));
-      }
-      return new Float32Array(buffer.slice(offset));
-    }
-
-    function createCameraFrustum(scale = 0.035, color = 0x38bdf8) {
-      const group = new THREE.Group();
-      const w = scale * 0.8, h = scale * 0.5, d = scale * 1.2;
-      const vertices = new Float32Array([
-        0, 0, 0,  -w, -h, d,
-        0, 0, 0,   w, -h, d,
-        0, 0, 0,   w,  h, d,
-        0, 0, 0,  -w,  h, d,
-        -w, -h, d,  w, -h, d,
-         w, -h, d,  w,  h, d,
-         w,  h, d, -w,  h, d,
-        -w,  h, d, -w, -h, d,
-        0, -h * 1.3, d,  -w * 0.4, -h, d,
-        0, -h * 1.3, d,   w * 0.4, -h, d
-      ]);
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-      const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 1.5 });
-      group.add(new THREE.LineSegments(geo, mat));
-      return group;
-    }
-
-    // --- 加载相机轨迹可视化 ---
-    async function loadTrajectory(url) {
-      trajectoryGroup.clear();
-      try {
-        const trajUrl = url.replace('reconstruction.ply', 'camera_poses.npy');
-        const resp = await fetch(trajUrl);
-        if (!resp.ok) return;
-
-        const buffer = await resp.arrayBuffer();
-        const floatData = parseNpy(buffer);
-        const numPoses = floatData.length / 16;
-
-        const points = [];
-        for (let i = 0; i < numPoses; i++) {
-          const off = i * 16;
-          const mat = new THREE.Matrix4().set(
-            floatData[off], floatData[off+1], floatData[off+2], floatData[off+3],
-            floatData[off+4], floatData[off+5], floatData[off+6], floatData[off+7],
-            floatData[off+8], floatData[off+9], floatData[off+10], floatData[off+11],
-            0, 0, 0, 1
-          );
-          const pos = new THREE.Vector3(floatData[off+3], floatData[off+7], floatData[off+11]);
-          points.push(pos);
-
-          // 视锥体标记 (每隔两帧或关键帧放置)
-          if (i % 2 === 0 || i === numPoses - 1) {
-            const isFirstOrLast = (i === 0 || i === numPoses - 1);
-            const frustum = createCameraFrustum(0.04, isFirstOrLast ? 0xf59e0b : 0x38bdf8);
-            frustum.matrixAutoUpdate = false;
-            frustum.matrix.copy(mat);
-            trajectoryGroup.add(frustum);
-          }
-        }
-
-        // 轨迹平滑路径
-        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-        const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
-        const line = new THREE.Line(lineGeo, lineMat);
-        trajectoryGroup.add(line);
-      } catch (err) {
-        console.warn("未找到轨迹数据或解析失败:", err);
-      }
-    }
-
-    // --- 加载 PLY 统一入口 ---
+    // --- 加载已有静态 PLY 文件 ---
     async function loadPLYFromUrl(url) {
+      stopLiveStream();
       showLoading(`正在拉取 ${url.split('/').pop()}...`);
       try {
         const response = await fetch(url);
@@ -681,11 +928,27 @@
         
         showLoading("正在解析 3D 几何特征与颜色...");
         const parsed = parseBinaryPLY(buffer);
-        rawPositions = parsed.positions;
-        rawColors = parsed.colors;
+        
+        // 重新构建点云
+        allPositions = Array.from(parsed.positions);
+        allColors = Array.from(parsed.colors);
+        voxelMap.clear();
 
-        buildPointCloud(rawPositions, rawColors);
-        await loadTrajectory(url);
+        const geo = pointCloudMesh.geometry;
+        geo.attributes.position.copyArray(parsed.positions);
+        geo.attributes.color.copyArray(parsed.colors);
+        geo.attributes.position.needsUpdate = true;
+        geo.attributes.color.needsUpdate = true;
+        geo.setDrawRange(0, parsed.vertexCount);
+        geo.computeBoundingBox();
+        originalBBox = geo.boundingBox;
+
+        document.getElementById('stat-points').innerText = parsed.vertexCount.toLocaleString();
+        if (originalBBox) {
+          const dim = new THREE.Vector3();
+          originalBBox.getSize(dim);
+          document.getElementById('stat-bbox').innerText = `${dim.x.toFixed(2)} × ${dim.y.toFixed(2)} × ${dim.z.toFixed(2)} m`;
+        }
 
         resetView();
         hideLoading();
@@ -695,88 +958,36 @@
       }
     }
 
-    function loadPLYFromFile(file) {
-      showLoading(`正在读取本地文件: ${file.name}...`);
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          showLoading("正在解析顶点数据...");
-          const parsed = parseBinaryPLY(e.target.result);
-          rawPositions = parsed.positions;
-          rawColors = parsed.colors;
-          buildPointCloud(rawPositions, rawColors);
-          trajectoryGroup.clear();
-          resetView();
-          hideLoading();
-        } catch (err) {
-          alert("解析文件失败: " + err.message);
-          hideLoading();
-        }
-      };
-      reader.readAsArrayBuffer(file);
-    }
-
-    // --- 色彩变换模式 ---
-    function applyColorMode() {
-      if (!pointCloudMesh || !rawPositions || !rawColors) return;
-
-      const mode = document.getElementById('color-mode').value;
-      const count = rawPositions.length / 3;
-      const sampling = parseInt(document.getElementById('sampling-rate').value, 10) / 100.0;
-      const step = Math.max(1, Math.round(1 / sampling));
-
-      const activeCount = Math.floor(count / step);
-      const filteredPos = new Float32Array(activeCount * 3);
-      const filteredCol = new Float32Array(activeCount * 3);
-
-      let minZ = Infinity, maxZ = -Infinity;
-      for (let i = 0; i < count; i += step) {
-        const z = rawPositions[i * 3 + 2];
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
-      }
-      const rangeZ = (maxZ - minZ) || 1.0;
-
-      let dstIdx = 0;
-      for (let i = 0; i < count; i += step) {
-        const srcIdx = i * 3;
-        const x = rawPositions[srcIdx];
-        const y = rawPositions[srcIdx + 1];
-        const z = rawPositions[srcIdx + 2];
-
-        filteredPos[dstIdx] = x;
-        filteredPos[dstIdx + 1] = y;
-        filteredPos[dstIdx + 2] = z;
-
-        if (mode === 'rgb') {
-          filteredCol[dstIdx] = rawColors[srcIdx];
-          filteredCol[dstIdx + 1] = rawColors[srcIdx + 1];
-          filteredCol[dstIdx + 2] = rawColors[srcIdx + 2];
-        } else if (mode === 'height') {
-          // 彩虹光谱渐变
-          const t = Math.max(0, Math.min(1, (z - minZ) / rangeZ));
-          const col = new THREE.Color().setHSL(0.7 * (1.0 - t), 1.0, 0.5);
-          filteredCol[dstIdx] = col.r;
-          filteredCol[dstIdx + 1] = col.g;
-          filteredCol[dstIdx + 2] = col.b;
-        } else if (mode === 'depth') {
-          const dist = Math.sqrt(x*x + y*y + z*z);
-          const t = Math.min(1.0, dist / 2.0);
-          filteredCol[dstIdx] = 0.2 + 0.8 * t;
-          filteredCol[dstIdx + 1] = 0.8 * (1.0 - t);
-          filteredCol[dstIdx + 2] = 1.0 - t;
-        } else if (mode === 'intensity') {
-          filteredCol[dstIdx] = 0.9;
-          filteredCol[dstIdx + 1] = 0.9;
-          filteredCol[dstIdx + 2] = 0.95;
-        }
-        dstIdx += 3;
+    // --- 导出当前点云为二进制 PLY ---
+    function exportCurrentPLY() {
+      const count = allPositions.length / 3;
+      if (count === 0) {
+        alert("当前没有点云数据可导出");
+        return;
       }
 
-      pointCloudMesh.geometry.setAttribute('position', new THREE.BufferAttribute(filteredPos, 3));
-      pointCloudMesh.geometry.setAttribute('color', new THREE.BufferAttribute(filteredCol, 3));
-      pointCloudMesh.geometry.attributes.position.needsUpdate = true;
-      pointCloudMesh.geometry.attributes.color.needsUpdate = true;
+      const header = `ply\nformat binary_little_endian 1.0\ncomment Exported from ABot-Recon Live Streaming Viewer\nelement vertex ${count}\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n`;
+      const headerBytes = new TextEncoder().encode(header);
+      const vertexBytes = new Uint8Array(count * 15);
+      const dataView = new DataView(vertexBytes.buffer);
+
+      let offset = 0;
+      for (let i = 0; i < count; i++) {
+        const pIdx = i * 3;
+        dataView.setFloat32(offset, allPositions[pIdx], true);
+        dataView.setFloat32(offset + 4, allPositions[pIdx + 1], true);
+        dataView.setFloat32(offset + 8, allPositions[pIdx + 2], true);
+        dataView.setUint8(offset + 12, Math.round(allColors[pIdx] * 255));
+        dataView.setUint8(offset + 13, Math.round(allColors[pIdx + 1] * 255));
+        dataView.setUint8(offset + 14, Math.round(allColors[pIdx + 2] * 255));
+        offset += 15;
+      }
+
+      const blob = new Blob([headerBytes, vertexBytes], { type: 'application/octet-stream' });
+      const a = document.createElement('a');
+      a.download = `abot_recon_live_${count}_points.ply`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
     }
 
     // --- 视角控制函数 ---
@@ -785,7 +996,7 @@
       const center = new THREE.Vector3();
       originalBBox.getCenter(center);
       controls.target.copy(center);
-      camera.position.set(center.x + 0.4, center.y - 0.7, center.z - 0.7);
+      camera.position.set(center.x + 0.3, center.y - 0.7, center.z - 0.7);
       camera.up.set(0, -1, 0);
       controls.update();
     }
@@ -832,13 +1043,38 @@
     }
 
     // --- 事件监听绑定 ---
+    document.getElementById('btn-stream-toggle').addEventListener('click', startLiveStream);
+
+    document.getElementById('voxel-size').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('voxel-size-val').innerText = `${(v * 100).toFixed(1)} cm`;
+    });
+
     document.getElementById('model-select').addEventListener('change', (e) => {
       loadPLYFromUrl(e.target.value);
     });
 
     document.getElementById('file-input').addEventListener('change', (e) => {
       if (e.target.files.length > 0) {
-        loadPLYFromFile(e.target.files[0]);
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          const parsed = parseBinaryPLY(evt.target.result);
+          allPositions = Array.from(parsed.positions);
+          allColors = Array.from(parsed.colors);
+          voxelMap.clear();
+          const geo = pointCloudMesh.geometry;
+          geo.attributes.position.copyArray(parsed.positions);
+          geo.attributes.color.copyArray(parsed.colors);
+          geo.attributes.position.needsUpdate = true;
+          geo.attributes.color.needsUpdate = true;
+          geo.setDrawRange(0, parsed.vertexCount);
+          geo.computeBoundingBox();
+          originalBBox = geo.boundingBox;
+          document.getElementById('stat-points').innerText = parsed.vertexCount.toLocaleString();
+          resetView();
+        };
+        reader.readAsArrayBuffer(file);
       }
     });
 
@@ -846,13 +1082,6 @@
       const val = parseFloat(e.target.value);
       document.getElementById('point-size-val').innerText = val.toFixed(3);
       if (pointCloudMesh) pointCloudMesh.material.size = val;
-    });
-
-    document.getElementById('color-mode').addEventListener('change', applyColorMode);
-
-    document.getElementById('sampling-rate').addEventListener('input', (e) => {
-      document.getElementById('sampling-val').innerText = e.target.value + '%';
-      applyColorMode();
     });
 
     document.getElementById('chk-trajectory').addEventListener('change', (e) => {
@@ -867,15 +1096,11 @@
       gridHelper.visible = e.target.checked;
     });
 
-    document.getElementById('chk-autorotate').addEventListener('change', (e) => {
-      controls.autoRotate = e.target.checked;
-      controls.autoRotateSpeed = 1.8;
-    });
-
     document.getElementById('btn-view-reset').addEventListener('click', resetView);
     document.getElementById('btn-view-front').addEventListener('click', setFrontView);
     document.getElementById('btn-view-top').addEventListener('click', setTopView);
     document.getElementById('btn-view-side').addEventListener('click', setSideView);
+    document.getElementById('btn-export-ply').addEventListener('click', exportCurrentPLY);
 
     document.getElementById('btn-screenshot').addEventListener('click', () => {
       renderer.render(scene, camera);
@@ -892,7 +1117,6 @@
       controls.update();
       renderer.render(scene, camera);
 
-      // 计算 FPS
       frameCount++;
       if (time - lastFpsTime >= 1000) {
         document.getElementById('stat-fps').innerText = `${frameCount} FPS`;
@@ -901,11 +1125,11 @@
       }
     }
 
-    // --- 页面加载完成后启动 ---
+    // --- 启动时初始化 ---
     window.onload = () => {
       initScene();
       animate(performance.now());
-      loadPLYFromUrl('/outputs/demo_loop/reconstruction.ply');
+      hideLoading();
     };
   </script>
 </body>
