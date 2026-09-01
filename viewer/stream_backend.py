@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import time
 from pathlib import Path
 from typing import Any, Generator, List, Optional, Sequence
-
 import numpy as np
 import torch
 from PIL import Image
@@ -82,6 +83,7 @@ class OnlineReconstructionEngine:
         image_input: Image.Image | np.ndarray | str | Path | torch.Tensor,
         confidence_threshold: Optional[float] = None,
         point_stride: Optional[int] = None,
+        include_thumbnail: bool = True,
     ) -> dict[str, Any]:
         """Process a single incoming frame and return incremental 3D reconstruction."""
         start_time = time.perf_counter()
@@ -186,6 +188,16 @@ class OnlineReconstructionEngine:
         rgb_tensor = tensor_chw.permute(1, 2, 0)  # (280, 504, 3)
         sampled_rgb = (rgb_tensor[::stride, ::stride].reshape(-1, 3).numpy() * 255).astype(np.uint8)
         valid_colors = sampled_rgb[valid_mask]
+        thumbnail_b64 = None
+        if include_thumbnail and pil_img is not None:
+            try:
+                thumb = pil_img.copy()
+                thumb.thumbnail((240, 160))
+                buf = io.BytesIO()
+                thumb.save(buf, format="JPEG", quality=75)
+                thumbnail_b64 = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception:
+                pass
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         current_idx = self.frame_idx
@@ -197,6 +209,7 @@ class OnlineReconstructionEngine:
             "points_xyz": valid_pts,  # (M, 3) Float32
             "points_rgb": valid_colors,  # (M, 3) Uint8
             "point_count": len(valid_pts),
+            "thumbnail": thumbnail_b64,
             "inference_time_ms": elapsed_ms,
             "fps": 1000.0 / elapsed_ms if elapsed_ms > 0 else 0.0,
         }

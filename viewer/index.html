@@ -290,18 +290,18 @@
       border: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    /* 实时 2D 摄像头小视窗 (HUD) */
+    /* 实时 2D 摄像头小视窗 (HUD - 左下角) */
     .camera-hud {
       position: absolute;
       bottom: 20px;
-      right: 20px;
+      left: 20px;
       z-index: 10;
       background: var(--panel-bg);
       backdrop-filter: blur(14px);
       border: 1px solid var(--panel-border);
       border-radius: 12px;
       overflow: hidden;
-      width: 240px;
+      width: 250px;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
       display: flex;
       flex-direction: column;
@@ -313,7 +313,7 @@
       font-size: 11px;
       font-weight: 700;
       color: var(--text-muted);
-      background: rgba(0, 0, 0, 0.3);
+      background: rgba(0, 0, 0, 0.35);
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -321,17 +321,17 @@
 
     .camera-hud img {
       width: 100%;
-      height: 135px;
+      height: 140px;
       object-fit: cover;
       background: #000;
       display: block;
     }
 
-    /* 操作提示栏 (底部左侧) */
+    /* 操作提示栏 (底部紧随 HUD 右侧) */
     .help-bar {
       position: absolute;
       bottom: 20px;
-      left: 20px;
+      left: 285px;
       z-index: 10;
       background: var(--panel-bg);
       backdrop-filter: blur(14px);
@@ -341,11 +341,9 @@
       font-size: 12px;
       color: var(--text-muted);
       display: flex;
-      gap: 16px;
+      gap: 14px;
       align-items: center;
     }
-
-    .help-item span {
       display: inline-block;
       padding: 2px 6px;
       background: rgba(255, 255, 255, 0.1);
@@ -747,6 +745,11 @@
         return;
       }
 
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
       // 重置所有实时建图缓存
       voxelMap.clear();
       allPositions = [];
@@ -769,16 +772,13 @@
 
       eventSource = new EventSource(url);
 
-      eventSource.addEventListener('start', (e) => {
-        const data = JSON.parse(e.data);
-        document.getElementById('stream-progress-text').innerText = `建图中: 0 / ${data.total_frames} 帧`;
-      });
-
-      eventSource.addEventListener('frame', (e) => {
-        const data = JSON.parse(e.data);
-
+      function handleFramePayload(data) {
         // 1. 更新 2D HUD 相机视图
-        document.getElementById('hud-img').src = data.image_url;
+        if (data.thumbnail) {
+          document.getElementById('hud-img').src = data.thumbnail;
+        } else if (data.image_url) {
+          document.getElementById('hud-img').src = data.image_url;
+        }
         document.getElementById('hud-frame-tag').innerText = `帧 #${data.frame_index + 1} (${data.point_count} 点)`;
 
         // 2. 更新相机位姿与视锥体
@@ -821,8 +821,23 @@
         document.getElementById('stream-progress-text').innerText = `建图中: ${data.frame_index + 1} / ${data.total_frames} 帧`;
         document.getElementById('stream-fps-text').innerText = `${data.fps.toFixed(1)} FPS`;
         document.getElementById('stat-latency').innerText = `${data.latency_ms} ms (${data.fps.toFixed(1)} FPS)`;
+      }
+
+      eventSource.addEventListener('start', (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('stream-progress-text').innerText = `建图中: 0 / ${data.total_frames} 帧`;
       });
 
+      eventSource.addEventListener('frame', (e) => {
+        handleFramePayload(JSON.parse(e.data));
+      });
+
+      eventSource.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.frame_index !== undefined) handleFramePayload(data);
+        } catch(err) {}
+      };
       eventSource.addEventListener('complete', (e) => {
         const data = JSON.parse(e.data);
         document.getElementById('stream-progress-text').innerText = `✅ 建图完成: ${data.total_frames} 帧全部处理`;
