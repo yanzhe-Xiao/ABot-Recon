@@ -1006,10 +1006,15 @@
         voxelMap.clear();
 
         const geo = pointCloudMesh.geometry;
-        geo.attributes.position.copyArray(parsed.positions);
-        geo.attributes.color.copyArray(parsed.colors);
-        geo.attributes.position.needsUpdate = true;
-        geo.attributes.color.needsUpdate = true;
+        if (geo.attributes.position.array.length < parsed.positions.length) {
+          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(parsed.positions), 3));
+          geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(parsed.colors), 3));
+        } else {
+          geo.attributes.position.copyArray(parsed.positions);
+          geo.attributes.color.copyArray(parsed.colors);
+          geo.attributes.position.needsUpdate = true;
+          geo.attributes.color.needsUpdate = true;
+        }
         geo.setDrawRange(0, parsed.vertexCount);
         geo.computeBoundingBox();
         originalBBox = geo.boundingBox;
@@ -1019,15 +1024,16 @@
           const dim = new THREE.Vector3();
           originalBBox.getSize(dim);
           document.getElementById('stat-bbox').innerText = `${dim.x.toFixed(2)} × ${dim.y.toFixed(2)} × ${dim.z.toFixed(2)} m`;
+          gridHelper.position.y = originalBBox.max.y + 0.1;
         }
 
+        await loadTrajectory(url);
         resetView();
         hideLoading();
       } catch (err) {
         alert("加载点云失败: " + err.message);
         hideLoading();
       }
-    }
 
     // --- 导出当前点云为二进制 PLY ---
     function exportCurrentPLY() {
@@ -1218,7 +1224,6 @@
       initScene();
       animate(performance.now());
       hideLoading();
-
       // 动态获取并加载服务端所有视频流序列
       fetch('/api/sequences')
         .then(r => r.json())
@@ -1235,6 +1240,24 @@
             updateStreamButtonLabel();
           }
         })
+        .catch(err => console.warn("Failed to load sequences list:", err));
+
+      // 动态获取并加载服务端所有离线对比模型
+      fetch('/api/offline_models')
+        .then(r => r.json())
+        .then(models => {
+          if (models && models.length > 0) {
+            const sel = document.getElementById('model-select');
+            sel.innerHTML = '';
+            models.forEach(m => {
+              const opt = document.createElement('option');
+              opt.value = m.url;
+              opt.innerText = m.name;
+              sel.appendChild(opt);
+            });
+          }
+        })
+        .catch(err => console.warn("Failed to load offline models list:", err));
     };
   </script>
 </body>

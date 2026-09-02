@@ -66,11 +66,72 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/sequences":
             return self.handle_sequences()
+        if path == "/api/offline_models":
+            return self.handle_offline_models()
 
         if path == "/api/status":
             return self.handle_status()
 
         return super().do_GET()
+
+    def handle_offline_models(self) -> None:
+        """List all reconstructed 3D point cloud models stored on disk."""
+        models = []
+        registry = [
+            {
+                "path": "outputs/tum_360_loop/reconstruction.ply",
+                "name": "🔄 TUM 360环绕 - 回环优化 (Loop Closure, 333万点)",
+                "category": "TUM 360",
+                "description": "360度大环绕轨迹对齐，消除闭环双层重影"
+            },
+            {
+                "path": "outputs/tum_360_noloop/reconstruction.ply",
+                "name": "🔄 TUM 360环绕 - 原始流式 (No Loop, 333万点)",
+                "category": "TUM 360",
+                "description": "纯因果单向累加，观察长程旋转下的轨迹与几何漂移"
+            },
+            {
+                "path": "outputs/tum_desk_loop/reconstruction.ply",
+                "name": "🖥️ TUM 办公桌面 - 回环优化 (Loop Closure, 270万点)",
+                "category": "TUM Desk",
+                "description": "电脑显示器/书籍/键盘，回环位姿图平滑对齐"
+            },
+            {
+                "path": "outputs/tum_desk_noloop/reconstruction.ply",
+                "name": "🖥️ TUM 办公桌面 - 原始流式 (No Loop, 270万点)",
+                "category": "TUM Desk",
+                "description": "纯因果单向流式累加"
+            },
+            {
+                "path": "outputs/demo_loop/reconstruction.ply",
+                "name": "🎬 快速演示序列 - 回环优化 (52.9万点)",
+                "category": "Demo",
+                "description": "60 帧快速测试序列"
+            },
+            {
+                "path": "outputs/demo_noloop/reconstruction.ply",
+                "name": "🚀 快速演示序列 - 原始流式 (52.9万点)",
+                "category": "Demo",
+                "description": "60 帧快速测试序列"
+            },
+        ]
+
+        for item in registry:
+            ply_file = ROOT_DIR / item["path"]
+            if ply_file.is_file():
+                models.append({
+                    "url": f"/{item['path']}",
+                    "name": item["name"],
+                    "category": item["category"],
+                    "description": item["description"],
+                    "size_bytes": ply_file.stat().st_size,
+                })
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(models, ensure_ascii=False).encode("utf-8"))
+        return
 
     def handle_sequences(self) -> None:
         """Scan and list all available video datasets and image sequences."""
