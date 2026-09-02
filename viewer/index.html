@@ -355,7 +355,7 @@
       margin-right: 4px;
     }
 
-    /* 加载中动画遮罩 */
+    /* 加载中动画遮罩 (默认隐藏，仅在异步拉取大文件时显示) */
     #loading-overlay {
       position: absolute;
       top: 0;
@@ -365,7 +365,7 @@
       background: rgba(13, 17, 23, 0.85);
       backdrop-filter: blur(8px);
       z-index: 100;
-      display: flex;
+      display: none;
       flex-direction: column;
       justify-content: center;
       align-items: center;
@@ -1220,11 +1220,11 @@
       }
     }
 
-    window.onload = () => {
+    function startApp() {
       initScene();
       animate(performance.now());
       hideLoading();
-      // 动态获取并加载服务端所有视频流序列
+
       fetch('/api/sequences')
         .then(r => r.json())
         .then(seqs => {
@@ -1258,7 +1258,13 @@
           }
         })
         .catch(err => console.warn("Failed to load offline models list:", err));
-    };
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startApp);
+    } else {
+      startApp();
+    }
   </script>
 </body>
 </html>
