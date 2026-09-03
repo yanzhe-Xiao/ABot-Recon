@@ -79,6 +79,30 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         models = []
         registry = [
             {
+                "path": "outputs/mine_VID20260903151208_loop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 回环优化 (VID151208, 196万点)",
+                "category": "My Videos",
+                "description": "data/mine 第1段视频，196万点三维致密点云"
+            },
+            {
+                "path": "outputs/mine_VID20260903151208_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 原始流式 (VID151208, 196万点)",
+                "category": "My Videos",
+                "description": "data/mine 第1段视频，纯因果流式预测"
+            },
+            {
+                "path": "outputs/mine_VID20260903151228_loop/reconstruction.ply",
+                "name": "📹 自定义视频 2 - 回环优化 (VID151228, 263万点)",
+                "category": "My Videos",
+                "description": "data/mine 第2段视频，263万点三维致密点云"
+            },
+            {
+                "path": "outputs/mine_VID20260903151228_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 2 - 原始流式 (VID151228, 263万点)",
+                "category": "My Videos",
+                "description": "data/mine 第2段视频，纯因果流式预测"
+            },
+            {
                 "path": "outputs/tum_360_loop/reconstruction.ply",
                 "name": "🔄 TUM 360环绕 - 回环优化 (Loop Closure, 333万点)",
                 "category": "TUM 360",
@@ -137,13 +161,18 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         """Scan and list all available video datasets and image sequences."""
         sequences = []
 
-        # Predefined sequence registry with friendly names
         registry = [
             {
-                "id": "examples/images",
-                "name": "🎬 快速演示序列 (Demo Sample)",
-                "path": "examples/images",
-                "description": "TUM 办公桌局部平移 (60 帧快速体验)"
+                "id": "data/mine/VID20260903151208",
+                "name": "📹 用户实拍视频 1 (VID151208)",
+                "path": "data/mine/VID20260903151208",
+                "description": "data/mine 实拍视频 (223 帧)"
+            },
+            {
+                "id": "data/mine/VID20260903151228",
+                "name": "📹 用户实拍视频 2 (VID151228)",
+                "path": "data/mine/VID20260903151228",
+                "description": "data/mine 实拍视频 (298 帧)"
             },
             {
                 "id": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
@@ -168,6 +197,12 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 "name": "🏢 TUM 完整大房间场景 (Full Room)",
                 "path": "data/tum/rgbd_dataset_freiburg1_room/rgb",
                 "description": "完整办公室大场景、多张桌椅、黑板 (1362 帧)"
+            },
+            {
+                "id": "examples/images",
+                "name": "🎬 快速演示序列 (Demo Sample)",
+                "path": "examples/images",
+                "description": "TUM 办公桌局部平移 (60 帧快速体验)"
             },
         ]
 
