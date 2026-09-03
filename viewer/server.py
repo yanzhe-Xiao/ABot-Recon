@@ -79,28 +79,52 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         models = []
         registry = [
             {
-                "path": "outputs/mine_VID20260903151208_loop/reconstruction.ply",
-                "name": "📹 自定义视频 1 - 回环优化 (VID151208, 196万点)",
+                "path": "outputs/mine_VID20260903153130_loop/reconstruction.ply",
+                "name": "📹 自定义视频 3 - 回环优化 (VID153130, 310万点)",
                 "category": "My Videos",
-                "description": "data/mine 第1段视频，196万点三维致密点云"
+                "description": "data/mine 第3段视频 (352 帧)，310万点超高清点云"
             },
             {
-                "path": "outputs/mine_VID20260903151208_noloop/reconstruction.ply",
-                "name": "📹 自定义视频 1 - 原始流式 (VID151208, 196万点)",
+                "path": "outputs/mine_VID20260903153130_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 3 - 原始流式 (VID153130, 310万点)",
                 "category": "My Videos",
-                "description": "data/mine 第1段视频，纯因果流式预测"
+                "description": "data/mine 第3段视频，纯因果流式预测"
+            },
+            {
+                "path": "outputs/mine_VID20260903153215_loop/reconstruction.ply",
+                "name": "📹 自定义视频 4 - 回环优化 (VID153215, 243万点)",
+                "category": "My Videos",
+                "description": "data/mine 第4段视频 (275 帧)，243万点超高清点云"
+            },
+            {
+                "path": "outputs/mine_VID20260903153215_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 4 - 原始流式 (VID153215, 243万点)",
+                "category": "My Videos",
+                "description": "data/mine 第4段视频，纯因果流式预测"
             },
             {
                 "path": "outputs/mine_VID20260903151228_loop/reconstruction.ply",
                 "name": "📹 自定义视频 2 - 回环优化 (VID151228, 263万点)",
                 "category": "My Videos",
-                "description": "data/mine 第2段视频，263万点三维致密点云"
+                "description": "data/mine 第2段视频 (298 帧)，263万点三维致密点云"
             },
             {
                 "path": "outputs/mine_VID20260903151228_noloop/reconstruction.ply",
                 "name": "📹 自定义视频 2 - 原始流式 (VID151228, 263万点)",
                 "category": "My Videos",
                 "description": "data/mine 第2段视频，纯因果流式预测"
+            },
+            {
+                "path": "outputs/mine_VID20260903151208_loop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 回环优化 (VID151208, 196万点)",
+                "category": "My Videos",
+                "description": "data/mine 第1段视频 (223 帧)，196万点三维致密点云"
+            },
+            {
+                "path": "outputs/mine_VID20260903151208_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 原始流式 (VID151208, 196万点)",
+                "category": "My Videos",
+                "description": "data/mine 第1段视频，纯因果流式预测"
             },
             {
                 "path": "outputs/tum_360_loop/reconstruction.ply",
@@ -162,6 +186,18 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         sequences = []
 
         registry = [
+            {
+                "id": "data/mine/VID20260903153130",
+                "name": "📹 用户实拍视频 3 (VID153130)",
+                "path": "data/mine/VID20260903153130",
+                "description": "data/mine 实拍视频 (352 帧)"
+            },
+            {
+                "id": "data/mine/VID20260903153215",
+                "name": "📹 用户实拍视频 4 (VID153215)",
+                "path": "data/mine/VID20260903153215",
+                "description": "data/mine 实拍视频 (275 帧)"
+            },
             {
                 "id": "data/mine/VID20260903151208",
                 "name": "📹 用户实拍视频 1 (VID151208)",
