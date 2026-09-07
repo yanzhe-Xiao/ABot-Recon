@@ -22,7 +22,7 @@ from viewer.stream_backend import OnlineReconstructionEngine
 # Global singleton engine and execution lock
 _ENGINE: Optional[OnlineReconstructionEngine] = None
 _ENGINE_LOCK = threading.Lock()
-
+_CURRENT_STREAM_CANCEL = threading.Event()
 
 def get_engine() -> OnlineReconstructionEngine:
     global _ENGINE
@@ -71,7 +71,8 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/status":
             return self.handle_status()
-
+        if path == "/api/stop":
+            return self.handle_stop_stream()
         return super().do_GET()
 
     def handle_offline_models(self) -> None:
@@ -79,52 +80,88 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         models = []
         registry = [
             {
-                "path": "outputs/mine_VID20260903153130_loop/reconstruction.ply",
-                "name": "📹 自定义视频 3 - 回环优化 (VID153130, 310万点)",
-                "category": "My Videos",
-                "description": "data/mine 第3段视频 (352 帧)，310万点超高清点云"
+                "path": "outputs/alignment/method2_lightglue_umeyama_full_merged.ply",
+                "name": "🔥 [方案二 多模态] 走廊实测 视频1+视频2 全量无损拼接 (LightGlue+Umeyama, 539万点, 推荐)",
+                "category": "Method 2 Multimodal",
+                "description": "基于 ALIKED+LightGlue 视频特征匹配与 Umeyama 求解相似变换融合 (5,389,020 点，78.87% @ 5cm)"
             },
             {
-                "path": "outputs/mine_VID20260903153130_noloop/reconstruction.ply",
-                "name": "📹 自定义视频 3 - 原始流式 (VID153130, 310万点)",
-                "category": "My Videos",
-                "description": "data/mine 第3段视频，纯因果流式预测"
+                "path": "outputs/alignment/method2_lightglue_umeyama_merged.ply",
+                "name": "🌟 [方案二 多模态] 走廊实测 视频1+视频2 1.5cm去重融合 (49.3万点)",
+                "category": "Method 2 Multimodal",
+                "description": "1.5cm 体素去重精简版本，适合低配显卡极致流畅交互 (493,129 点，13MB)"
             },
             {
-                "path": "outputs/mine_VID20260903153215_loop/reconstruction.ply",
-                "name": "📹 自定义视频 4 - 回环优化 (VID153215, 243万点)",
-                "category": "My Videos",
-                "description": "data/mine 第4段视频 (275 帧)，243万点超高清点云"
+                "path": "outputs/alignment/method1_kiss_gicp_full_merged.ply",
+                "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 全量无损拼接 (KISS-Matcher+GICP, 539万点)",
+                "category": "Method 1 Geometric",
+                "description": "纯 3D 几何特征 Faster-PFH + small_gicp 并行对齐无损拼接 (5,389,020 点，75.85% @ 5cm)"
             },
             {
-                "path": "outputs/mine_VID20260903153215_noloop/reconstruction.ply",
-                "name": "📹 自定义视频 4 - 原始流式 (VID153215, 243万点)",
-                "category": "My Videos",
-                "description": "data/mine 第4段视频，纯因果流式预测"
+                "path": "outputs/alignment/method1_kiss_gicp_merged.ply",
+                "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 1.5cm去重融合 (46.4万点)",
+                "category": "Method 1 Geometric",
+                "description": "1.5cm 体素去重平滑过渡版本 (463,701 点，12MB)"
             },
             {
-                "path": "outputs/mine_VID20260903151228_loop/reconstruction.ply",
-                "name": "📹 自定义视频 2 - 回环优化 (VID151228, 263万点)",
-                "category": "My Videos",
-                "description": "data/mine 第2段视频 (298 帧)，263万点三维致密点云"
+                "path": "outputs/alignment/merged.ply",
+                "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 R3PM-Net全量融合 (merged.ply, 539万点)",
+                "category": "R3PM-Net Merged",
+                "description": "基于 R3PM-Net 深度点匹配网络与 Sinkhorn 对应估计对齐 (5,389,020 点，80.8MB)"
             },
             {
-                "path": "outputs/mine_VID20260903151228_noloop/reconstruction.ply",
-                "name": "📹 自定义视频 2 - 原始流式 (VID151228, 263万点)",
-                "category": "My Videos",
-                "description": "data/mine 第2段视频，纯因果流式预测"
+                "path": "outputs/alignment/mine_r3pm_net_5mm_merged.ply",
+                "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 5mm去重融合 (276万点)",
+                "category": "R3PM-Net Merged",
+                "description": "5mm 接触面体素去重平滑过渡版本 (2,759,565 点，39.5MB)"
             },
             {
-                "path": "outputs/mine_VID20260903151208_loop/reconstruction.ply",
-                "name": "📹 自定义视频 1 - 回环优化 (VID151208, 196万点)",
+                "path": "outputs/mine_VID20260903181931_loop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 回环优化 (VID181931, 279万点, 走廊实测)",
                 "category": "My Videos",
-                "description": "data/mine 第1段视频 (223 帧)，196万点三维致密点云"
+                "description": "data/mine 走廊实测视频流 (316 帧)，279万点超高清点云"
             },
             {
-                "path": "outputs/mine_VID20260903151208_noloop/reconstruction.ply",
-                "name": "📹 自定义视频 1 - 原始流式 (VID151208, 196万点)",
+                "path": "outputs/mine_VID20260903181931_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 1 - 原始流式 (VID181931, 279万点)",
                 "category": "My Videos",
-                "description": "data/mine 第1段视频，纯因果流式预测"
+                "description": "data/mine 走廊视频 1，纯因果流式预测"
+            },
+            {
+                "path": "outputs/mine_VID20260903182041_loop/reconstruction.ply",
+                "name": "📹 自定义视频 2 - 回环优化 (VID182041, 260万点, 走廊实测)",
+                "category": "My Videos",
+                "description": "data/mine 走廊实测视频流 (295 帧)，260万点超高清点云"
+            },
+            {
+                "path": "outputs/mine_VID20260903182041_noloop/reconstruction.ply",
+                "name": "📹 自定义视频 2 - 原始流式 (VID182041, 260万点)",
+                "category": "My Videos",
+                "description": "data/mine 走廊视频 2，纯因果流式预测"
+            },
+            {
+                "path": "outputs/alignment/tum_method2_lightglue_umeyama_full_merged.ply",
+                "name": "🔥 [TUM 方案二] 360+Desk 100%全量无损拼接 (604万超高清点云, 推荐)",
+                "category": "TUM Merged",
+                "description": "保留全部 333万+270万 原始点云，零点数损失 (6,041,700 点，86MB)"
+            },
+            {
+                "path": "outputs/alignment/tum_method1_kiss_gicp_full_merged.ply",
+                "name": "🔥 [TUM 方案一] 360+Desk 100%全量无损拼接 (604万超高清点云)",
+                "category": "TUM Merged",
+                "description": "纯几何配准全量拼接，零点数损失 (6,041,700 点，86MB)"
+            },
+            {
+                "path": "outputs/alignment/tum_method2_lightglue_umeyama_merged.ply",
+                "name": "🌟 [TUM 方案二] 360+Desk 5mm去重融合 (LightGlue+Umeyama, 222万点)",
+                "category": "TUM Merged",
+                "description": "5mm 接触面体素去重平滑过渡版本 (2,217,810 点，31MB)"
+            },
+            {
+                "path": "outputs/alignment/tum_method1_kiss_gicp_merged.ply",
+                "name": "📐 [TUM 方案一] 360+Desk 5mm去重融合 (KISS-Matcher+GICP, 226万点)",
+                "category": "TUM Merged",
+                "description": "5mm 接触面体素去重平滑过渡版本 (2,261,226 点，32MB)"
             },
             {
                 "path": "outputs/tum_360_loop/reconstruction.ply",
@@ -187,28 +224,16 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
 
         registry = [
             {
-                "id": "data/mine/VID20260903153130",
-                "name": "📹 用户实拍视频 3 (VID153130)",
-                "path": "data/mine/VID20260903153130",
-                "description": "data/mine 实拍视频 (352 帧)"
+                "id": "data/mine/VID20260903181931",
+                "name": "📹 用户实拍视频 1 (走廊流式 VID181931)",
+                "path": "data/mine/VID20260903181931",
+                "description": "data/mine 实拍走廊视频 (316 帧)"
             },
             {
-                "id": "data/mine/VID20260903153215",
-                "name": "📹 用户实拍视频 4 (VID153215)",
-                "path": "data/mine/VID20260903153215",
-                "description": "data/mine 实拍视频 (275 帧)"
-            },
-            {
-                "id": "data/mine/VID20260903151208",
-                "name": "📹 用户实拍视频 1 (VID151208)",
-                "path": "data/mine/VID20260903151208",
-                "description": "data/mine 实拍视频 (223 帧)"
-            },
-            {
-                "id": "data/mine/VID20260903151228",
-                "name": "📹 用户实拍视频 2 (VID151228)",
-                "path": "data/mine/VID20260903151228",
-                "description": "data/mine 实拍视频 (298 帧)"
+                "id": "data/mine/VID20260903182041",
+                "name": "📹 用户实拍视频 2 (走廊流式 VID182041)",
+                "path": "data/mine/VID20260903182041",
+                "description": "data/mine 实拍走廊视频 (295 帧)"
             },
             {
                 "id": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
@@ -272,9 +297,27 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             "device": "cuda",
         }
         self.wfile.write(json.dumps(status).encode("utf-8"))
+    def handle_stop_stream(self) -> None:
+        """Signal any running streaming worker to abort immediately."""
+        global _CURRENT_STREAM_CANCEL
+        _CURRENT_STREAM_CANCEL.set()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "stopped"}).encode("utf-8"))
+
 
     def handle_sse_stream(self, query_string: str) -> None:
         """Stream frame-by-frame 3D reconstruction using Server-Sent Events (SSE)."""
+        global _CURRENT_STREAM_CANCEL
+
+        # Preempt: Signal any currently running stream to abort immediately
+        _CURRENT_STREAM_CANCEL.set()
+
+        # Create a fresh cancellation event for this new stream session
+        cancel_event = threading.Event()
+        _CURRENT_STREAM_CANCEL = cancel_event
+
         params = urllib.parse.parse_qs(query_string)
         point_stride = int(params.get("point_stride", ["4"])[0])
         conf_thresh = float(params.get("confidence_threshold", ["0.1"])[0])
@@ -299,36 +342,46 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(404, "No image frames found in directory")
             return
 
-        print(f"[Streaming Server] Starting SSE stream: {image_dir_name} ({len(image_paths)} frames, stride={frame_stride})...", flush=True)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache, no-transform")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-
-        def send_sse(event_name: str, payload: dict) -> bool:
-            try:
-                data = f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
-                self.wfile.write(data.encode("utf-8"))
-                self.wfile.flush()
-                return True
-            except (BrokenPipeError, ConnectionResetError):
-                return False
-
-        # Send start event
-        if not send_sse("start", {
-            "total_frames": len(image_paths),
-            "point_stride": point_stride,
-            "confidence_threshold": conf_thresh,
-        }):
-            return
+        print(f"[Streaming Server] Waiting to acquire engine lock for: {image_dir_name} ({len(image_paths)} frames)...", flush=True)
 
         engine = get_engine()
         with _ENGINE_LOCK:
+            if cancel_event.is_set():
+                print(f"[Streaming Server] Stream aborted before acquiring lock.", flush=True)
+                return
+
+            print(f"[Streaming Server] Lock acquired. Starting SSE stream: {image_dir_name} ({len(image_paths)} frames, stride={frame_stride})...", flush=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def send_sse(event_name: str, payload: dict) -> bool:
+                try:
+                    data = f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
+                    self.wfile.write(data.encode("utf-8"))
+                    self.wfile.flush()
+                    return True
+                except Exception:
+                    return False
+
+            # Send start event AFTER acquiring the engine lock so the client is in sync!
+            if not send_sse("start", {
+                "total_frames": len(image_paths),
+                "point_stride": point_stride,
+                "confidence_threshold": conf_thresh,
+            }):
+                return
+
             engine.reset()
             total_points = 0
             for i, img_path in enumerate(image_paths):
+                if cancel_event.is_set():
+                    print(f"[Streaming Server] Stream cancelled by user at frame {i+1}.", flush=True)
+                    break
+
                 res = engine.process_frame(
                     img_path,
                     confidence_threshold=conf_thresh,
@@ -359,18 +412,17 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 )
 
                 if not send_sse("frame", frame_data):
-                    print(f"[Streaming Server] Client disconnected at frame {i}", flush=True)
+                    print(f"[Streaming Server] Client disconnected at frame {i+1}.", flush=True)
                     break
 
                 time.sleep(0.01)
 
-            # Send complete event
-            send_sse("complete", {
-                "total_frames": len(image_paths),
-                "total_points": total_points,
-            })
-            print(f"[Streaming Server] Completed stream of {len(image_paths)} frames.", flush=True)
-
+            if not cancel_event.is_set():
+                send_sse("complete", {
+                    "total_frames": len(image_paths),
+                    "total_points": total_points,
+                })
+                print(f"[Streaming Server] Completed stream of {len(image_paths)} frames.", flush=True)
     def log_message(self, format: str, *args) -> None:
         pass
 

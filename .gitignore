@@ -13,3 +13,4 @@ examples/images/
 *.so
 data/
 *.tgz
+AGENTS.md

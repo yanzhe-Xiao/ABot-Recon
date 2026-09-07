@@ -407,6 +407,8 @@
       <div class="control-group">
         <label style="font-size:12px; color:var(--text-muted);">📹 选择视频流序列 (Video Sequence)</label>
         <select id="stream-sequence-select">
+          <option value="data/mine/VID20260903181931" selected>📹 用户实拍视频 1 (走廊流式 VID181931 - 316 帧)</option>
+          <option value="data/mine/VID20260903182041">📹 用户实拍视频 2 (走廊流式 VID182041 - 295 帧)</option>
           <option value="data/tum/rgbd_dataset_freiburg1_desk/rgb">🖥️ TUM 办公桌面全景 (Desk - 613 帧)</option>
           <option value="data/tum/rgbd_dataset_freiburg1_xyz/rgb">📐 TUM 空间平移序列 (XYZ - 798 帧)</option>
           <option value="data/tum/rgbd_dataset_freiburg1_360/rgb">🔄 TUM 360度环绕回环 (360 Loop - 756 帧)</option>
@@ -422,11 +424,10 @@
         </div>
         <div class="btn-group">
           <select id="stream-max-frames">
-            <option value="0" selected>全部帧 (完整全长视频流)</option>
-            <option value="60">前 60 帧 (快速体验)</option>
+            <option value="60" selected>前 60 帧 (快速体验, 推荐)</option>
             <option value="120">前 120 帧 (平滑长程)</option>
             <option value="300">前 300 帧 (大场景)</option>
-            <option value="600">前 600 帧 (超长序列)</option>
+            <option value="0">全部帧 (完整全长视频流)</option>
           </select>
           <select id="stream-frame-stride">
             <option value="1" selected>Stride 1 (逐帧)</option>
@@ -472,6 +473,20 @@
       <div class="section-title">离线对比数据源</div>
       <div class="control-group">
         <select id="model-select">
+          <option value="/outputs/alignment/method2_lightglue_umeyama_full_merged.ply" selected>🔥 [方案二 多模态] 走廊实测 视频1+视频2 全量无损拼接 (LightGlue+Umeyama, 539万点, 推荐)</option>
+          <option value="/outputs/alignment/method2_lightglue_umeyama_merged.ply">🌟 [方案二 多模态] 走廊实测 视频1+视频2 1.5cm去重融合 (49.3万点)</option>
+          <option value="/outputs/alignment/method1_kiss_gicp_full_merged.ply">📐 [方案一 纯几何] 走廊实测 视频1+视频2 全量无损拼接 (KISS-Matcher+GICP, 539万点)</option>
+          <option value="/outputs/alignment/method1_kiss_gicp_merged.ply">📐 [方案一 纯几何] 走廊实测 视频1+视频2 1.5cm去重融合 (46.4万点)</option>
+          <option value="/outputs/alignment/merged.ply">🤖 [方案三 深度学习] 走廊实测 视频1+视频2 R3PM-Net全量融合 (merged.ply, 539万点)</option>
+          <option value="/outputs/alignment/mine_r3pm_net_5mm_merged.ply">🤖 [方案三 深度学习] 走廊实测 视频1+视频2 5mm去重融合 (276万点)</option>
+          <option value="/outputs/mine_VID20260903181931_loop/reconstruction.ply">📹 自定义视频 1 - 回环优化 (VID181931, 279万点, 走廊实测)</option>
+          <option value="/outputs/mine_VID20260903181931_noloop/reconstruction.ply">📹 自定义视频 1 - 原始流式 (VID181931, 279万点)</option>
+          <option value="/outputs/mine_VID20260903182041_loop/reconstruction.ply">📹 自定义视频 2 - 回环优化 (VID182041, 260万点, 走廊实测)</option>
+          <option value="/outputs/mine_VID20260903182041_noloop/reconstruction.ply">📹 自定义视频 2 - 原始流式 (VID182041, 260万点)</option>
+          <option value="/outputs/alignment/tum_method2_lightglue_umeyama_full_merged.ply">🔥 [TUM 方案二] 360+Desk 100%全量无损拼接 (604万超高清点云, 推荐)</option>
+          <option value="/outputs/alignment/tum_method1_kiss_gicp_full_merged.ply">🔥 [TUM 方案一] 360+Desk 100%全量无损拼接 (604万超高清点云)</option>
+          <option value="/outputs/alignment/tum_method2_lightglue_umeyama_merged.ply">🌟 [TUM 方案二] 360+Desk 5mm去重融合 (LightGlue+Umeyama, 222万点)</option>
+          <option value="/outputs/alignment/tum_method1_kiss_gicp_merged.ply">📐 [TUM 方案一] 360+Desk 5mm去重融合 (KISS-Matcher+GICP, 226万点)</option>
           <option value="/outputs/tum_360_loop/reconstruction.ply">🔄 TUM 360环绕 - 回环优化 (333万点)</option>
           <option value="/outputs/tum_360_noloop/reconstruction.ply">🔄 TUM 360环绕 - 原始流式 (333万点)</option>
           <option value="/outputs/tum_desk_loop/reconstruction.ply">🖥️ TUM 办公桌面 - 回环优化 (270万点)</option>
@@ -791,7 +806,7 @@
       }
     }
 
-    function startLiveStream() {
+    async function startLiveStream() {
       if (isStreaming) {
         stopLiveStream();
         return;
@@ -801,6 +816,10 @@
         eventSource.close();
         eventSource = null;
       }
+
+      try {
+        await fetch('/api/stop');
+      } catch (err) {}
 
       voxelMap.clear();
       allPositions = [];
@@ -823,9 +842,14 @@
       const confThresh = 0.1;
       const pointStride = 4;
       const url = `/api/stream?sequence=${encodeURIComponent(seq)}&max_frames=${maxFrames}&stride=${frameStride}&point_stride=${pointStride}&confidence_threshold=${confThresh}`;
-
+      document.getElementById('stream-progress-text').innerText = '正在排队/启动引擎...';
       eventSource = new EventSource(url);
-
+      eventSource.onerror = () => {
+        if (isStreaming) {
+          console.warn("EventSource disconnected or closed");
+          stopLiveStream();
+        }
+      };
       function handleFramePayload(data) {
         if (data.thumbnail) {
           document.getElementById('hud-img').src = data.thumbnail;
@@ -907,6 +931,7 @@
         eventSource.close();
         eventSource = null;
       }
+      fetch('/api/stop').catch(() => {});
       isStreaming = false;
       const btn = document.getElementById('btn-stream-toggle');
       if (btn) {
@@ -914,6 +939,7 @@
         btn.classList.remove('running');
       }
       document.getElementById('live-indicator').style.display = 'none';
+      if (liveCameraFrustum) liveCameraFrustum.visible = false;
     }
 
     function parseNpy(buffer) {
@@ -1017,13 +1043,19 @@
         else if (p.type === 'short' || p.type === 'ushort') stride += 2;
         else if (p.type === 'double') stride += 8;
       }
-
+      const isDouble = properties.some(p => (p.name === 'x' || p.name === 'y' || p.name === 'z') && p.type === 'double');
       let offset = 0;
       for (let i = 0; i < vertexCount; i++) {
         const pIdx = i * 3;
-        positions[pIdx] = dataView.getFloat32(offset + xOff, true);
-        positions[pIdx + 1] = dataView.getFloat32(offset + yOff, true);
-        positions[pIdx + 2] = dataView.getFloat32(offset + zOff, true);
+        if (isDouble) {
+          positions[pIdx] = dataView.getFloat64(offset + xOff, true);
+          positions[pIdx + 1] = dataView.getFloat64(offset + yOff, true);
+          positions[pIdx + 2] = dataView.getFloat64(offset + zOff, true);
+        } else {
+          positions[pIdx] = dataView.getFloat32(offset + xOff, true);
+          positions[pIdx + 1] = dataView.getFloat32(offset + yOff, true);
+          positions[pIdx + 2] = dataView.getFloat32(offset + zOff, true);
+        }
 
         if (rOff !== -1) {
           colors[pIdx] = dataView.getUint8(offset + rOff) / 255.0;
@@ -1052,19 +1084,16 @@
         allColors = Array.from(parsed.colors);
         voxelMap.clear();
 
-        const geo = pointCloudMesh.geometry;
-        if (geo.attributes.position.array.length < parsed.positions.length) {
-          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(parsed.positions), 3));
-          geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(parsed.colors), 3));
-        } else {
-          geo.attributes.position.copyArray(parsed.positions);
-          geo.attributes.color.copyArray(parsed.colors);
-          geo.attributes.position.needsUpdate = true;
-          geo.attributes.color.needsUpdate = true;
+        const newGeo = new THREE.BufferGeometry();
+        newGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(parsed.positions), 3));
+        newGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(parsed.colors), 3));
+        newGeo.setDrawRange(0, parsed.vertexCount);
+        newGeo.computeBoundingBox();
+        if (pointCloudMesh.geometry) {
+          pointCloudMesh.geometry.dispose();
         }
-        geo.setDrawRange(0, parsed.vertexCount);
-        geo.computeBoundingBox();
-        originalBBox = geo.boundingBox;
+        pointCloudMesh.geometry = newGeo;
+        originalBBox = newGeo.boundingBox;
 
         document.getElementById('stat-points').innerText = parsed.vertexCount.toLocaleString();
         if (originalBBox) {
@@ -1113,43 +1142,49 @@
       a.click();
     }
 
-    function resetView() {
-      if (!originalBBox) return;
+    function getBoxDimensions() {
+      if (!originalBBox) return { center: new THREE.Vector3(), maxDim: 1.0, dim: new THREE.Vector3(1, 1, 1) };
       const center = new THREE.Vector3();
+      const dim = new THREE.Vector3();
       originalBBox.getCenter(center);
+      originalBBox.getSize(dim);
+      const maxDim = Math.max(dim.x, dim.y, dim.z, 0.5);
+      return { center, maxDim, dim };
+    }
+
+    function resetView() {
+      const { center, maxDim } = getBoxDimensions();
       controls.target.copy(center);
-      camera.position.set(center.x + 0.3, center.y - 0.7, center.z - 0.7);
+      camera.position.set(center.x + maxDim * 0.35, center.y - maxDim * 0.55, center.z - maxDim * 0.85);
       camera.up.set(0, -1, 0);
+      camera.lookAt(center);
       controls.update();
     }
 
     function setFrontView() {
-      if (!originalBBox) return;
-      const center = new THREE.Vector3();
-      originalBBox.getCenter(center);
+      const { center, maxDim } = getBoxDimensions();
       controls.target.copy(center);
-      camera.position.set(center.x, center.y, center.z - 1.2);
+      camera.position.set(center.x, center.y, center.z - maxDim * 1.1);
       camera.up.set(0, -1, 0);
+      camera.lookAt(center);
       controls.update();
     }
 
     function setTopView() {
-      if (!originalBBox) return;
-      const center = new THREE.Vector3();
-      originalBBox.getCenter(center);
+      const { center, maxDim } = getBoxDimensions();
       controls.target.copy(center);
-      camera.position.set(center.x, center.y - 1.5, center.z);
+      camera.position.set(center.x, center.y - maxDim * 1.3, center.z);
       camera.up.set(0, 0, 1);
+      camera.lookAt(center);
       controls.update();
     }
 
     function setSideView() {
-      if (!originalBBox) return;
-      const center = new THREE.Vector3();
-      originalBBox.getCenter(center);
+      const { center, maxDim } = getBoxDimensions();
       controls.target.copy(center);
-      camera.position.set(center.x + 1.2, center.y, center.z);
+      camera.position.set(center.x + maxDim * 1.2, center.y, center.z);
       camera.up.set(0, -1, 0);
+      camera.lookAt(center);
       controls.update();
     }
 
@@ -1276,6 +1311,9 @@
               opt.innerText = m.name;
               sel.appendChild(opt);
             });
+            if (sel.options.length > 0) {
+              loadPLYFromUrl(sel.options[0].value);
+            }
           }
         })
         .catch(err => console.warn("Failed to load offline models list:", err));
