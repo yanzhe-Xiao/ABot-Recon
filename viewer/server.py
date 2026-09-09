@@ -52,6 +52,9 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(200)
         self.end_headers()
+    def do_HEAD(self) -> None:
+        self.do_GET()
+
 
     def do_GET(self) -> None:
         parsed_url = urllib.parse.urlparse(self.path)
@@ -79,6 +82,54 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         """List all reconstructed 3D point cloud models stored on disk."""
         models = []
         registry = [
+            {
+                "path": "outputs/alignment/data_05_08_method2_merged.ply",
+                "name": "🔥 [方案二 多模态] 视频流05-08 正常真彩融合 (341万点, 1.5cm体素去重, 推荐)",
+                "category": "Method 2 Multimodal 05-08",
+                "description": "基于 ALIKED+LightGlue+Umeyama+small_gicp 对视频05-08多视角流式融合 (3,409,327 点，87.8MB)"
+            },
+            {
+                "path": "outputs/alignment/data_05_08_method2_colored_merged.ply",
+                "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分融合 (341万点, 红/绿/蓝/金, 推荐)",
+                "category": "Method 2 Colored 05-08",
+                "description": "每个视频流赋予独立高对比颜色（05红/06绿/07蓝/08金），直观清晰展现各视频点云空间分布"
+            },
+            {
+                "path": "outputs/alignment/data_05_08_method2_full_merged.ply",
+                "name": "🌟 [方案二 多模态] 视频流05-08 正常真彩全量融合 (1401万点超高清点云, 零损失)",
+                "category": "Method 2 Multimodal 05-08",
+                "description": "保留05-08全部 14,014,980 点，无损拼接完整全景走廊与开阔大厅 (361MB)"
+            },
+            {
+                "path": "outputs/alignment/data_05_08_method2_colored_full_merged.ply",
+                "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分全量融合 (1401万点超高清点云)",
+                "category": "Method 2 Colored 05-08",
+                "description": "1401万点全量四色点云（05红/06绿/07蓝/08金）"
+            },
+            {
+                "path": "outputs/data_05_loop/reconstruction.ply",
+                "name": "📹 视频流 05 - 点云重建 (567万点, A-B-C-B-A 循环全景)",
+                "category": "05-08 Individual Videos",
+                "description": "data/data/05 走廊循环视频流 (643 帧)，567万点超高清点云"
+            },
+            {
+                "path": "outputs/data_06_loop/reconstruction.ply",
+                "name": "📹 视频流 06 - 点云重建 (271万点, C-D 右侧视角)",
+                "category": "05-08 Individual Videos",
+                "description": "data/data/06 视频流 (307 帧)，271万点点云"
+            },
+            {
+                "path": "outputs/data_07_loop/reconstruction.ply",
+                "name": "📹 视频流 07 - 点云重建 (344万点, B-D 主干基准视角)",
+                "category": "05-08 Individual Videos",
+                "description": "data/data/07 视频流 (390 帧)，344万点点云 (多视角基准锚点)"
+            },
+            {
+                "path": "outputs/data_08_loop/reconstruction.ply",
+                "name": "📹 视频流 08 - 点云重建 (220万点, C-D 左侧视角)",
+                "category": "05-08 Individual Videos",
+                "description": "data/data/08 视频流 (249 帧)，220万点点云"
+            },
             {
                 "path": "outputs/alignment/method2_lightglue_umeyama_full_merged.ply",
                 "name": "🔥 [方案二 多模态] 走廊实测 视频1+视频2 全量无损拼接 (LightGlue+Umeyama, 539万点, 推荐)",
@@ -223,6 +274,30 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         sequences = []
 
         registry = [
+            {
+                "id": "data/data/05",
+                "name": "📹 视频流 05 (A-B-C-B-A 循环全景)",
+                "path": "data/data/05",
+                "description": "A狭窄走廊出发走至B右转90°到C，绕书柜转180°回B左转直走回A (643 帧)"
+            },
+            {
+                "id": "data/data/06",
+                "name": "📹 视频流 06 (C-D 右侧视角)",
+                "path": "data/data/06",
+                "description": "从目标区域右侧走过 (镜头朝左) C点到D点 (307 帧)"
+            },
+            {
+                "id": "data/data/07",
+                "name": "📹 视频流 07 (B-D 主干基准视角)",
+                "path": "data/data/07",
+                "description": "与06同路线，摄像头运动基本相同，B点到D点全程 (390 帧)"
+            },
+            {
+                "id": "data/data/08",
+                "name": "📹 视频流 08 (C-D 左侧视角)",
+                "path": "data/data/08",
+                "description": "与06同区域，但从左侧走过 (镜头朝右) C点到D点 (249 帧)"
+            },
             {
                 "id": "data/mine/VID20260903181931",
                 "name": "📹 用户实拍视频 1 (走廊流式 VID181931)",
