@@ -152,6 +152,7 @@ def render_camera_view(
     *,
     point_radius: int = 2,
     max_depth: float = 12.0,
+    adaptive_voxel: float | None = None,
 ) -> np.ndarray:
     delta = points - pose[:3, 3]
     camera_points = delta @ pose[:3, :3]
@@ -163,11 +164,17 @@ def render_camera_view(
     cx, cy = WIDTH * 0.5, HEIGHT * 0.5
     u = np.rint(fx * camera_points[:, 0] / depth + cx).astype(np.int32)
     v = np.rint(fy * camera_points[:, 1] / depth + cy).astype(np.int32)
-    margin = point_radius + 1
+    margin = (5 if adaptive_voxel is not None else point_radius) + 1
     inside = (u >= margin) & (u < WIDTH - margin) & (v >= 48 + margin) & (v < HEIGHT - margin)
     u, v, depth, rgb = u[inside], v[inside], depth[inside], rgb[inside]
+    if adaptive_voxel is None:
+        radii = np.full(len(depth), point_radius, dtype=np.int8)
+    else:
+        projected_radius = 0.52 * adaptive_voxel * min(fx, fy) / depth
+        radii = np.clip(np.ceil(projected_radius), 1, 5).astype(np.int8)
+        point_radius = 5
     order = np.argsort(depth)[::-1]
-    u, v, rgb = u[order], v[order], rgb[order]
+    u, v, rgb, radii = u[order], v[order], rgb[order], radii[order]
     canvas = np.broadcast_to(BACKGROUND, (HEIGHT, WIDTH, 3)).copy()
     offsets = [
         (du, dv)
@@ -176,7 +183,8 @@ def render_camera_view(
         if du * du + dv * dv <= point_radius * point_radius + 1
     ]
     for du, dv in offsets:
-        canvas[v + dv, u + du] = rgb
+        active = radii * radii >= du * du + dv * dv
+        canvas[v[active] + dv, u[active] + du] = rgb[active]
     return canvas
 
 
@@ -218,13 +226,15 @@ def write_path_video(
     title: str,
     route: str,
     reference_frames: dict[int, np.ndarray] | None = None,
+    adaptive_voxel: float | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     selected_poses = smooth_poses(poses[indices])
     with imageio.get_writer(path, fps=fps, codec="libx264", quality=9,
                             macro_block_size=2, ffmpeg_log_level="warning") as writer:
         for output_index, (frame_index, pose) in enumerate(zip(indices, selected_poses)):
-            rendered = render_camera_view(points, colors, pose, focal)
+            rendered = render_camera_view(points, colors, pose, focal,
+                                          adaptive_voxel=adaptive_voxel)
             rendered = label(rendered, title, f"{route} | frame {int(frame_index)}")
             if reference_frames is not None:
                 reference = cv2.resize(reference_frames[int(frame_index)], (WIDTH // 2, HEIGHT))
