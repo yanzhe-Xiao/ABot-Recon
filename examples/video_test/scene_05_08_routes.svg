@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800" viewBox="0 0 1000 800" role="img" aria-labelledby="title desc">
+  <title id="title">05–08 场景及采集路线</title>
+  <desc id="desc">A位于右下狭窄走廊，B位于左下入口转角，C位于中部偏右，D位于上方。书架与桌椅将开阔空地分为左右两部分。Line 05：A到B到C到B到A；Line 06：C到D，经过右侧；Line 07：B到D，沿右侧；Line 08：C到D，经过左侧。示意图非按比例绘制。</desc>
+  <defs>
+    <marker id="blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 9 5 1 9" fill="none" stroke="#168bd2" stroke-width="1.6"/></marker>
+    <marker id="red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1 9 5 1 9" fill="none" stroke="#d94141" stroke-width="1.6"/></marker>
+    <marker id="purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1 9 5 1 9" fill="none" stroke="#9553b4" stroke-width="1.6"/></marker>
+    <marker id="yellow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1 9 5 1 9" fill="none" stroke="#d4ac00" stroke-width="1.6"/></marker>
+    <style>
+      text {font-family:"Microsoft YaHei","Noto Sans CJK SC","PingFang SC",sans-serif;fill:#26323d;font-size:20px}
+      .route {fill:none;stroke-width:4;stroke-linecap:round;stroke-linejoin:round}
+      .furniture {fill:#eef0f2;stroke:#85909a;stroke-width:1.8}
+      .point {font-size:28px;font-weight:600;paint-order:stroke;stroke:white;stroke-width:7px;stroke-linejoin:round}
+      .muted {font-size:17px;fill:#69747e}
+    </style>
+  </defs>
+  <rect width="1000" height="800" fill="white"/>
+  <text x="60" y="49" font-size="26" font-weight="600">05–08 场景及采集路线</text>
+  <!-- 场地轮廓：右下走廊与纵向开阔区域相连。 -->
+  <path d="M100 95 V710 H920 M530 95 V610 H920" fill="none" stroke="#414a52" stroke-width="3"/>
+  <text x="300" y="99" text-anchor="middle" class="muted">开阔空地</text>
+  <text x="727" y="598" text-anchor="middle" class="muted">狭窄走廊</text>
+  <rect class="furniture" x="263" y="175" width="90" height="100" rx="2"/>
+  <text x="308" y="233" text-anchor="middle">书架</text>
+  <rect class="furniture" x="271" y="325" width="76" height="56" rx="2"/>
+  <rect class="furniture" x="252" y="338" width="12" height="30" rx="2"/>
+  <rect class="furniture" x="354" y="338" width="12" height="30" rx="2"/>
+  <text x="309" y="361" text-anchor="middle">桌椅</text>
+  <rect class="furniture" x="277" y="475" width="55" height="110" rx="2"/>
+  <text x="304" y="537" text-anchor="middle">书架</text>
+  <!-- Line 05：A→B，右转后沿左侧到C，再沿右侧返回B、A。 -->
+  <path class="route" stroke="#168bd2" d="M842 684 H330" marker-end="url(#blue)"/>
+  <path class="route" stroke="#168bd2" d="M271 670 H190 Q153 670 153 633 V431" marker-end="url(#blue)"/>
+  <path class="route" stroke="#168bd2" d="M153 421 H419" marker-end="url(#blue)"/>
+  <path class="route" stroke="#168bd2" d="M426 451 V631" marker-end="url(#blue)"/>
+  <path class="route" stroke="#168bd2" d="M426 642 H841" marker-end="url(#blue)"/>
+  <!-- Line 06与08都只覆盖C→D。 -->
+  <path class="route" stroke="#d94141" d="M456 431 V149" marker-end="url(#red)"/>
+  <path class="route" stroke="#9553b4" d="M491 621 V149" marker-end="url(#purple)"/>
+  <path class="route" stroke="#d4ac00" d="M197 443 V149" marker-end="url(#yellow)"/>
+  <text class="point" x="861" y="673">A</text>
+  <text class="point" x="289" y="664">B</text>
+  <text class="point" x="380" y="475">C</text>
+  <text class="point" x="305" y="150">D</text>
+  <text x="601" y="190" font-size="21" font-weight="600">采集路线</text>
+  <path class="route" stroke="#168bd2" d="M603 234 H662" marker-end="url(#blue)"/>
+  <text x="687" y="241">Line 05</text>
+  <text x="687" y="272" class="muted">A → B → C → B → A</text>
+  <path class="route" stroke="#d94141" d="M603 315 H662" marker-end="url(#red)"/>
+  <text x="687" y="322">Line 06</text>
+  <text x="687" y="353" class="muted">C → D（右侧）</text>
+  <path class="route" stroke="#9553b4" d="M603 396 H662" marker-end="url(#purple)"/>
+  <text x="687" y="403">Line 07</text>
+  <text x="687" y="434" class="muted">B → D（右侧）</text>
+  <path class="route" stroke="#d4ac00" d="M603 477 H662" marker-end="url(#yellow)"/>
+  <text x="687" y="484">Line 08</text>
+  <text x="687" y="515" class="muted">C → D（左侧）</text>
+  <text x="100" y="759" class="muted">箭头表示行进方向；重合路线错开显示。场景为示意，非按比例绘制。</text>
+</svg>

@@ -9,8 +9,20 @@ dist/
 outputs/
 checkpoints/
 examples/images/
+learn/
 
 *.so
 data/
 *.tgz
 AGENTS.md
+
+# Local datasets, checkpoints, and generated reconstruction artifacts.
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.pth
+*.ckpt
+*.safetensors
+*.pcd
+*.bin
