@@ -89,8 +89,11 @@ POST /api/stream/end?session_id=cam_01
 
 收到流结束标记后，服务端会自动执行以下流水线：
 1. **点云空间体素去重**：聚合并使用设定的 `voxel_size`（如 1.5cm）做体素滤波，自动剔除摄像机停留/慢速移动时的双层重影；
-2. **导出持久化资产**：
+2. **导出持久化资产与多模态匹配张量**：
    - 3D 点云文件：`outputs/streams/<session_id>/reconstruction.ply`
+   - 像素 3D 反查表：`outputs/streams/<session_id>/world_points.pt`（为方案二配准必备）
+   - 视频帧 RGB 张量：`outputs/streams/<session_id>/colors.pt`（为方案二特征提取必备）
+   - 置信度张量：`outputs/streams/<session_id>/confidence.pt`
    - 相机位姿轨迹：`outputs/streams/<session_id>/camera_poses.npy`
    - 会话统计摘要：`outputs/streams/<session_id>/session_summary.json`
 3. **返回最终完成报表**：
@@ -175,8 +178,11 @@ asyncio.run(run_camera_stream())
 | `POST` | `/api/stream/start?session_id=<id>&point_stride=4&voxel_size=0.015` | 初始化并创建会话 |
 | `POST` | `/api/stream/frame?session_id=<id>` | 上传单帧原始图片二进制数据，返回当前帧位姿与点云 |
 | `POST` | `/api/stream/end?session_id=<id>` | 显式通知该视频流结束，触发点云去重与 PLY 导出 |
+| `POST` | `/api/fuse?session_ids=cam_1,cam_2&outputs=normal,colored` | **调用方法二对完成的流式点云执行多模态极速融合** |
 | `GET` | `/api/sessions` | 查询当前正在推流的活跃会话以及已完成的历史会话 |
-| `GET` | `/api/streams/{session_id}/reconstruction.ply` | 直接下载已完成会话导出的二进制 PLY 点云 |
+| `GET` | `/api/fusions` | 列出所有已生成的方案二融合模型资产清单与下载链接 |
+| `GET` | `/api/streams/{session_id}/reconstruction.ply` | 直接下载已完成单流会话导出的二进制 PLY 点云 |
+| `GET` | `/api/fusions/{fusion_id}/{filename}` | 直接下载方案二多流融合后的 PLY 点云或报告 |
 
 ---
 

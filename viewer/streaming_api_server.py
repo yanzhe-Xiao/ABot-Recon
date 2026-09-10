@@ -42,6 +42,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -295,6 +296,13 @@ class MultiSessionReconstructionManager:
             all_pts = torch.stack(session.history_points)  # (N, H, W, 3)
             all_colors = torch.stack(session.history_colors)  # (N, H, W, 3)
             all_conf = torch.stack(session.history_conf)  # (N, H, W)
+            # Save raw tensors for downstream Method 2 multimodal matching and fusion
+            torch.save(all_pts.cpu(), session_dir / "world_points.pt")
+            torch.save(all_colors.cpu(), session_dir / "colors.pt")
+            torch.save(all_conf.cpu(), session_dir / "confidence.pt")
+            deliverables["world_points_path"] = str(session_dir / "world_points.pt")
+            deliverables["colors_path"] = str(session_dir / "colors.pt")
+            deliverables["confidence_path"] = str(session_dir / "confidence.pt")
 
             stride = session.point_stride
             thresh = session.confidence_threshold
@@ -367,6 +375,49 @@ class MultiSessionReconstructionManager:
 
         print(f"[Finalize] Session [{session_id}] finalized in {time.time() - t0:.2f}s! ({dedup_count:,} points)")
         return summary
+    async def fuse_sessions(
+        self,
+        session_ids: Optional[List[str]] = None,
+        outputs: str = "normal,colored,transforms,report,viewer",
+        voxel_size: float = 0.015,
+        anchor: Optional[str] = None,
+        prefix: str = "stream_fused",
+    ) -> Dict[str, Any]:
+        """Trigger Method 2 multi-stream multimodal fusion across completed sessions."""
+        from scripts.match_and_fuse_method2 import Method2FusionPipeline
+
+        if not session_ids:
+            session_ids = [
+                d.name for d in self.output_base_dir.iterdir()
+                if d.is_dir() and (d / "world_points.pt").is_file()
+            ]
+
+        if len(session_ids) < 2:
+            raise ValueError(f"Method 2 fusion requires at least 2 sessions with point clouds, found: {session_ids}")
+
+        recon_dirs = [self.output_base_dir / sid for sid in session_ids]
+        fusion_out_dir = REPO_ROOT / "outputs/alignment/stream_fusions" / prefix
+        fusion_out_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n[Server Fusion] Triggering Method 2 Fusion for sessions: {session_ids} -> {fusion_out_dir}")
+
+        async with self.gpu_lock:
+            loop = asyncio.get_event_loop()
+            def _run():
+                pipeline = Method2FusionPipeline(
+                    device=str(self.device),
+                    merge_voxel_size=voxel_size,
+                )
+                return pipeline.execute(
+                    inputs=recon_dirs,
+                    output_dir=fusion_out_dir,
+                    outputs=outputs,
+                    anchor=anchor,
+                    prefix=prefix,
+                )
+            result = await loop.run_in_executor(None, _run)
+
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +535,19 @@ async def websocket_stream(
                 if msg_type in ("EOS", "END", "FINISH", "STOP"):
                     print(f"[WS] Received text EOS command for session [{session_id}]")
                     summary = await manager.finalize_session(session_id)
+                    if payload.get("fuse") or payload.get("fuse_with"):
+                        fuse_sids = payload.get("fuse_with", [])
+                        if session_id not in fuse_sids:
+                            fuse_sids.append(session_id)
+                        try:
+                            fuse_res = await manager.fuse_sessions(
+                                session_ids=fuse_sids,
+                                outputs=payload.get("outputs", "normal,colored,transforms"),
+                                voxel_size=float(payload.get("voxel_size", 0.015)),
+                            )
+                            summary["fusion_result"] = fuse_res
+                        except Exception as fe:
+                            summary["fusion_error"] = str(fe)
                     await websocket.send_text(json.dumps(summary))
                     break
 
@@ -604,6 +668,65 @@ def download_session_ply(session_id: str):
         raise HTTPException(status_code=404, detail=f"PLY not found for session '{session_id}'")
     return FileResponse(str(ply), media_type="application/octet-stream", filename=f"{session_id}_reconstruction.ply")
 
+
+
+@app.post("/api/fuse")
+async def fuse_streams(
+    session_ids: Optional[str] = Query(None, description="Comma-separated session IDs to fuse, e.g. 'cam_1,cam_2'. Omit to fuse all."),
+    outputs: str = Query("normal,colored,transforms,report,viewer", description="Outputs: normal, colored, all, etc."),
+    voxel_size: float = Query(0.015, description="Voxel size in meters"),
+    anchor: Optional[str] = Query(None, description="Anchor session ID (default: auto)"),
+    prefix: str = Query("stream_fused", description="Output filename prefix"),
+):
+    """Trigger Method 2 multimodal registration & fusion across completed video streams."""
+    manager = get_manager()
+    sids = [s.strip() for s in session_ids.split(",") if s.strip()] if session_ids else None
+    try:
+        res = await manager.fuse_sessions(
+            session_ids=sids,
+            outputs=outputs,
+            voxel_size=voxel_size,
+            anchor=anchor,
+            prefix=prefix,
+        )
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/fusions")
+def list_fusions():
+    """List all Method 2 fused models generated from streaming sessions."""
+    fusions_dir = REPO_ROOT / "outputs/alignment/stream_fusions"
+    items = []
+    if fusions_dir.is_dir():
+        for d in fusions_dir.iterdir():
+            if d.is_dir():
+                ply_files = list(d.glob("*.ply"))
+                json_files = list(d.glob("*_transforms.json"))
+                items.append({
+                    "fusion_id": d.name,
+                    "path": str(d),
+                    "ply_models": [
+                        {
+                            "name": p.name,
+                            "size_mb": round(p.stat().st_size / 1024 / 1024, 2),
+                            "download_url": f"/api/fusions/{d.name}/{p.name}",
+                        }
+                        for p in ply_files
+                    ],
+                    "metadata": str(json_files[0]) if json_files else None,
+                })
+    return {"fusions": items}
+
+
+@app.get("/api/fusions/{fusion_id}/{filename}")
+def download_fusion_file(fusion_id: str, filename: str):
+    """Download a fused PLY model or transform JSON."""
+    fpath = REPO_ROOT / "outputs/alignment/stream_fusions" / fusion_id / filename
+    if not fpath.is_file():
+        raise HTTPException(status_code=404, detail="Fusion deliverable not found")
+    return FileResponse(str(fpath), media_type="application/octet-stream", filename=filename)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ABot-Recon Real-time Video Stream API Server")
