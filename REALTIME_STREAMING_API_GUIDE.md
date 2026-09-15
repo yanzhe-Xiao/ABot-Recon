@@ -56,8 +56,8 @@ ABot-Recon 神经流式建图模型（约 1.9GB 显存，bf16）作为只读共�
 | **`frame_stride`** | `int` | `1` | **时间抽帧步长**：`1` 逐帧处理；`2` 每隔 1 帧处理一次（处理 30 FPS 高帧率视频时可降低服务器负载） |
 | **`voxel_size`** | `float` | `0.015` | **最终导出的体素网格大小**（单位米，如 `0.015` 表示 1.5cm 体素滤波，消除多帧重影；传 `0` 表示不去重） |
 | **`confidence_threshold`** | `float` | `0.1` | **置信度阈值**（`0.0 ~ 1.0`）：滤除低置信度噪点与飞点 |
+| **`dynamic_filter`** | `bool` | `false` | **动态物体实时滤除开关**：开启后实时运行 YOLO-seg 语义分割，彻底抹除画面中的行人、车辆等移动物体及三维残影 |
 | **`include_points`** | `bool` | `true` | 是否在每帧的实时响应中返回三维坐标和 RGB 数组（若为 `false` 则只回传相机位姿与统计，节省下行带宽） |
----
 
 ## 三、 视频流结束（End-of-Stream, EOS）协议定义
 
@@ -154,7 +154,59 @@ POST /api/stream/end?session_id=cam_01
 | `POST` | `/api/scenes/{scene_id}/fuse?voxel_size=0.015` | 显式手动触发或重新运行该场景下所有已完成视频流的融合对齐 |
 | `GET` | `/api/scenes/{scene_id}/transforms.json` | 下载该场景下各视频流相对基准坐标系的 Sim(3) 尺度因子与 4x4 变换矩阵 |
 
-## 六、 客户端调用示例代码 (Python)
+---
+
+## 六、 动态物体实时滤除与服务端启动配置 (`--dynamic-filter`)
+
+在走廊、展厅、车间等存在行走人员或移动设备的真实场景中，实时推流建图容易产生动态人物拉丝和三维残影。服务端现已原生内置基于 YOLO-seg 语义分割的**动态物体像素级实时滤除引擎**。
+
+### 1. 服务端启动命令行参数
+
+启动 `viewer/streaming_api_server.py` 时，可通过以下参数控制动态滤除行为：
+
+```bash
+# 1. 默认启动（轻量模式，不启用动态滤除，低延迟）
+python viewer/streaming_api_server.py --port 8090
+
+# 2. 开启实时动态物体滤除（默认全局开启 YOLO-seg 过滤，彻底去除行人/车辆）
+python viewer/streaming_api_server.py --port 8090 --dynamic-filter
+
+# 3. 高精度模式（采用更大模型，提升遮挡人体与远距离物体的分割精度）
+python viewer/streaming_api_server.py --port 8090 \
+  --dynamic-filter \
+  --dynamic-model yolo11m-seg.pt \
+  --dynamic-conf 0.15 \
+  --dynamic-dilate 11
+```
+
+| 服务端启动参数 | 类型 | 默认值 | 详细说明 |
+| :--- | :--- | :--- | :--- |
+| **`--dynamic-filter`** / **`--no-dynamic-filter`** | `bool` | `False` | 是否在服务端全局默认开启动态物体实时滤除功能 |
+| **`--dynamic-model`** | `str` | `yolo11n-seg.pt` | 分割模型权重，可选 `yolo11n-seg.pt`（极速 ~5ms）、`yolo11m-seg.pt`（高精度 ~18ms） |
+| **`--dynamic-conf`** | `float` | `0.15` | 动态实体检测置信度阈值（建议 `0.10 ~ 0.25`） |
+| **`--dynamic-dilate`** | `int` | `7` | 形态学膨胀核半径（像素），外扩掩模以彻底吸收人体衣物和边缘毛刺 |
+
+### 2. 客户端单流动态重写（Per-Session Override）
+
+即使服务端默认未全局开启 `--dynamic-filter`，特定客户端也可以在建立连接时通过 URL 参数主动开启：
+
+- **WebSocket 连接参数**：
+  ```text
+  ws://<IP>:8090/ws/stream?session_id=cam_01&dynamic_filter=true
+  ```
+- **REST 启动会话参数**：
+  ```http
+  POST /api/stream/start?session_id=cam_01&dynamic_filter=true
+  ```
+
+### 3. 工作原理与资产交付
+1. **逐帧共形对齐**：视频帧进入模型时，实时生成与 $280 \times 504$ 点图完全对齐的布尔静态掩膜；
+2. **增量回传置零**：处于人体、车辆范围内的三维点被实时剔除，不参与 WebSocket 下发；
+3. **存盘固化**：流结束（EOS）时，服务端不仅导出已滤除动态人物的纯净 `reconstruction.ply`，还会同步导出 `static_masks.pt`，为后续场景级多路视频融合提供纯净的多模态匹配基准。
+
+---
+
+## 七、 客户端调用示例代码 (Python)
 
 ### 1. WebSocket 双向流式传输客户端示例
 
@@ -201,7 +253,7 @@ asyncio.run(run_camera_stream())
 
 ---
 
-## 七、 REST HTTP 接口概览（非 WebSocket 备用通道）
+## 八、 REST HTTP 接口概览（非 WebSocket 备用通道）
 
 对于不支持 WebSocket 的 HTTP 客户端，服务同样提供了标准 REST 接口：
 
@@ -218,7 +270,7 @@ asyncio.run(run_camera_stream())
 
 ---
 
-## 八、 多客户端并发与时序融合实测验证
+## 九、 多客户端并发与时序融合实测验证
 
 通过 `scripts/test_stream_client.py` 模拟 **两台摄像机（`cam_alpha` 与 `cam_beta`）以不同采样步长和体素大小并发推流**：
 - **`cam_alpha`**：输入视频 06，参数 `point_stride=4, voxel_size=0.015m`，结束时发送 JSON `{"type": "EOS"}`；

@@ -53,7 +53,64 @@ if str(REPO_ROOT) not in sys.path:
 from abot_recon import ABotRecon
 from abot_recon.preprocessing import preprocess_image
 
+try:
+    from ultralytics import YOLO
+    HAS_ULTRALYTICS = True
+except ImportError:
+    HAS_ULTRALYTICS = False
 
+
+class AlignedDynamicMaskGenerator:
+    """
+    Generates dynamic object masks directly on preprocessed [H, W, 3] tensors,
+    ensuring 100% pixel-perfect alignment with ABot-Recon pointmaps in real-time.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "yolo11n-seg.pt",
+        dynamic_classes: list[int] | None = None,
+        conf_thresh: float = 0.15,
+        dilate_kernel: int = 7,
+        device: str = "cuda:0",
+    ):
+        if not HAS_ULTRALYTICS:
+            raise RuntimeError("ultralytics package is required for dynamic object filtering. Please install it via pip install ultralytics")
+        print(f"[Dynamic Filter] Initializing YOLO segmentation model '{model_name}' on {device}...")
+        self.model = YOLO(model_name)
+        self.dynamic_classes = dynamic_classes if dynamic_classes is not None else [0, 1, 2, 3, 5, 7, 15, 16]
+        self.conf_thresh = conf_thresh
+        self.dilate_kernel = dilate_kernel
+        self.device = device
+
+    def predict_single(self, rgb_uint8: np.ndarray) -> np.ndarray:
+        """
+        rgb_uint8: [H, W, 3] uint8 RGB array (280 x 504)
+        Returns: [H, W] boolean ndarray (True = Static / Keep, False = Dynamic / Filter out)
+        """
+        h, w = rgb_uint8.shape[:2]
+        results = self.model.predict(
+            rgb_uint8,
+            classes=self.dynamic_classes,
+            conf=self.conf_thresh,
+            device=self.device,
+            verbose=False,
+        )
+        dyn_mask = np.zeros((h, w), dtype=np.uint8)
+        if len(results) > 0 and results[0].masks is not None:
+            for mask_data in results[0].masks.data:
+                m = mask_data.cpu().numpy().astype(np.uint8)
+                if m.shape != (h, w):
+                    import cv2
+                    m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+                dyn_mask = np.bitwise_or(dyn_mask, m)
+
+        if self.dilate_kernel > 0 and np.any(dyn_mask):
+            import cv2
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.dilate_kernel, self.dilate_kernel))
+            dyn_mask = cv2.dilate(dyn_mask, kernel)
+
+        return dyn_mask == 0
 # ---------------------------------------------------------------------------
 # Session Data Structure
 # ---------------------------------------------------------------------------
@@ -70,7 +127,7 @@ class StreamSession:
     save_ply: bool = True
     save_trajectory: bool = True
     auto_fuse: bool = True
-    # State tracking
+    dynamic_filter: bool = False
     frame_counter: int = 0  # Total frames received
     processed_counter: int = 0  # Frames actually forwarded through model
     created_at: float = field(default_factory=time.time)
@@ -87,8 +144,7 @@ class StreamSession:
     history_points: List[torch.Tensor] = field(default_factory=list)
     history_colors: List[torch.Tensor] = field(default_factory=list)
     history_conf: List[torch.Tensor] = field(default_factory=list)
-
-
+    history_static_masks: List[torch.Tensor] = field(default_factory=list)
     def __post_init__(self):
         if not self.scene_id:
             self.scene_id = self.session_id
@@ -116,6 +172,10 @@ class MultiSessionReconstructionManager:
         device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
         output_base_dir: Path = REPO_ROOT / "outputs/streams",
         scenes_base_dir: Path = REPO_ROOT / "outputs/scenes",
+        dynamic_filter: bool = False,
+        dynamic_model: str = "yolo11n-seg.pt",
+        dynamic_conf: float = 0.15,
+        dynamic_dilate: int = 7,
     ):
         self.device = torch.device(device)
         self.output_base_dir = output_base_dir
@@ -127,6 +187,18 @@ class MultiSessionReconstructionManager:
         self.meta_lock = asyncio.Lock()
         self.scene_locks: Dict[str, asyncio.Lock] = {}
         self.scene_dirty: Dict[str, bool] = {}
+        self.dynamic_filter = dynamic_filter
+        self.dynamic_model = dynamic_model
+        self.dynamic_conf = dynamic_conf
+        self.dynamic_dilate = dynamic_dilate
+        self.mask_generator: Optional[AlignedDynamicMaskGenerator] = None
+        if self.dynamic_filter:
+            self.mask_generator = AlignedDynamicMaskGenerator(
+                model_name=self.dynamic_model,
+                conf_thresh=self.dynamic_conf,
+                dilate_kernel=self.dynamic_dilate,
+                device=str(self.device),
+            )
         print(f"[Server Engine] Loading ABot-Recon model on {self.device}...")
         self.model = ABotRecon.from_pretrained(
             checkpoint,
@@ -251,6 +323,7 @@ class MultiSessionReconstructionManager:
         save_ply: bool = True,
         save_trajectory: bool = True,
         auto_fuse: bool = True,
+        dynamic_filter: Optional[bool] = None,
     ) -> StreamSession:
         effective_scene_id = scene_id.strip() if scene_id and scene_id.strip() else session_id
         if session_id in self.sessions:
@@ -263,7 +336,8 @@ class MultiSessionReconstructionManager:
             session.voxel_size = voxel_size
             session.confidence_threshold = confidence_threshold
             session.auto_fuse = auto_fuse
-            session.is_active = True
+            if dynamic_filter is not None:
+                session.dynamic_filter = bool(dynamic_filter)
             session.last_active = time.time()
             self.register_session_to_scene(session_id, effective_scene_id)
             return session
@@ -283,6 +357,7 @@ class MultiSessionReconstructionManager:
             save_ply=save_ply,
             save_trajectory=save_trajectory,
             auto_fuse=auto_fuse,
+            dynamic_filter=self.dynamic_filter if dynamic_filter is None else bool(dynamic_filter),
             paged_manager=paged_mgr,
         )
         self.sessions[session_id] = session
@@ -371,6 +446,19 @@ class MultiSessionReconstructionManager:
             (tensor_chw.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8)
         )
 
+        static_mask = None
+        if session.dynamic_filter:
+            if self.mask_generator is None:
+                self.mask_generator = AlignedDynamicMaskGenerator(
+                    model_name=self.dynamic_model,
+                    conf_thresh=self.dynamic_conf,
+                    dilate_kernel=self.dynamic_dilate,
+                    device=str(self.device),
+                )
+            rgb_full = (tensor_chw.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8).numpy()
+            static_mask = self.mask_generator.predict_single(rgb_full)
+            session.history_static_masks.append(torch.from_numpy(static_mask))
+
         stride = session.point_stride
         thresh = session.confidence_threshold
 
@@ -379,11 +467,13 @@ class MultiSessionReconstructionManager:
         valid = np.isfinite(sampled_pts).all(axis=-1)
         if thresh > 0:
             valid &= sampled_conf >= thresh
+        if static_mask is not None:
+            sampled_static = static_mask[::stride, ::stride].reshape(-1)
+            valid &= sampled_static
 
         valid_pts = sampled_pts[valid].astype(np.float32)
         rgb_arr = (tensor_chw.permute(1, 2, 0)[::stride, ::stride].reshape(-1, 3).numpy() * 255).astype(np.uint8)
         valid_rgb = rgb_arr[valid]
-
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         total_pts_approx = session.processed_counter * len(valid_pts)
 
@@ -442,7 +532,10 @@ class MultiSessionReconstructionManager:
             deliverables["world_points_path"] = str(session_dir / "world_points.pt")
             deliverables["colors_path"] = str(session_dir / "colors.pt")
             deliverables["confidence_path"] = str(session_dir / "confidence.pt")
-
+            if len(session.history_static_masks) == total_frames:
+                all_masks = torch.stack(session.history_static_masks)
+                torch.save(all_masks.cpu(), session_dir / "static_masks.pt")
+                deliverables["static_masks_path"] = str(session_dir / "static_masks.pt")
             stride = session.point_stride
             thresh = session.confidence_threshold
 
@@ -453,7 +546,9 @@ class MultiSessionReconstructionManager:
             valid = np.isfinite(flat_pts).all(axis=-1)
             if thresh > 0:
                 valid &= flat_conf >= thresh
-
+            if len(session.history_static_masks) == total_frames:
+                flat_masks = torch.stack(session.history_static_masks)[:, ::stride, ::stride].reshape(-1).numpy()
+                valid &= flat_masks
             pts_valid = flat_pts[valid].astype(np.float32)
             rgb_valid = flat_rgb[valid].astype(np.uint8)
             raw_count = len(pts_valid)
@@ -801,6 +896,7 @@ async def websocket_stream(
     confidence_threshold: float = Query(0.1, description="Confidence threshold for points [0, 1]"),
     include_points: bool = Query(True, description="Whether to include point coordinates in frame response"),
     auto_fuse: bool = Query(True, description="Automatically fuse with existing completed streams in the same scene on EOS"),
+    dynamic_filter: Optional[bool] = Query(None, description="Enable real-time dynamic object removal (YOLO-seg)"),
 ):
     await websocket.accept()
     manager = get_manager()
@@ -813,6 +909,7 @@ async def websocket_stream(
         voxel_size=voxel_size,
         confidence_threshold=confidence_threshold,
         auto_fuse=auto_fuse,
+        dynamic_filter=dynamic_filter,
     )
 
     # Initial handshake acknowledgement
@@ -830,9 +927,8 @@ async def websocket_stream(
                 "voxel_size": session.voxel_size,
                 "confidence_threshold": session.confidence_threshold,
                 "auto_fuse": session.auto_fuse,
+                "dynamic_filter": session.dynamic_filter,
             },
-            "scene_download_url": f"/api/scenes/{session.scene_id}/reconstruction.ply",
-            "end_stream_instruction": "Send text '{\"type\": \"EOS\"}' or binary token b'EOS\\x00\\x00' or close socket",
         })
     )
 
@@ -921,6 +1017,7 @@ def start_session(
     voxel_size: float = Query(0.015),
     confidence_threshold: float = Query(0.1),
     auto_fuse: bool = Query(True, description="Whether to auto-fuse when this stream ends"),
+    dynamic_filter: Optional[bool] = Query(None, description="Enable real-time dynamic object removal (YOLO-seg)"),
 ):
     """Initialize a new persistent streaming session."""
     manager = get_manager()
@@ -933,6 +1030,7 @@ def start_session(
         voxel_size=voxel_size,
         confidence_threshold=confidence_threshold,
         auto_fuse=auto_fuse,
+        dynamic_filter=dynamic_filter,
     )
     return {
         "status": "session_started",
@@ -948,6 +1046,7 @@ def start_session(
             "voxel_size": session.voxel_size,
             "confidence_threshold": session.confidence_threshold,
             "auto_fuse": session.auto_fuse,
+            "dynamic_filter": session.dynamic_filter,
         },
     }
 
@@ -1206,12 +1305,26 @@ def main() -> None:
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--dynamic-filter",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable real-time 2D dynamic object removal (YOLO-seg) by default",
+    )
+    parser.add_argument("--dynamic-model", type=str, default="yolo11n-seg.pt", help="YOLO segmentation model")
+    parser.add_argument("--dynamic-conf", type=float, default=0.15, help="Confidence threshold for dynamic object detection")
+    parser.add_argument("--dynamic-dilate", type=int, default=7, help="Dilation kernel size in pixels")
     args = parser.parse_args()
 
     # Pre-init manager
     global _MANAGER
-    _MANAGER = MultiSessionReconstructionManager(device=args.device)
-
+    _MANAGER = MultiSessionReconstructionManager(
+        device=args.device,
+        dynamic_filter=args.dynamic_filter,
+        dynamic_model=args.dynamic_model,
+        dynamic_conf=args.dynamic_conf,
+        dynamic_dilate=args.dynamic_dilate,
+    )
     print(f"\n==================================================================")
     print(f"  ABot-Recon Streaming Server Running on http://{args.host}:{args.port}")
     print(f"  WebSocket Stream Endpoint: ws://{args.host}:{args.port}/ws/stream")
