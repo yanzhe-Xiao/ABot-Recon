@@ -13,4 +13,8 @@ examples/images/
 *.so
 data/
 *.tgz
+*.pt
+*.pth
+runs/
+.cache/
 AGENTS.md

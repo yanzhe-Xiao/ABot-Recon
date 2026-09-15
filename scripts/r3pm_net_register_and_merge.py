@@ -331,9 +331,11 @@ def main() -> None:
         poses_tgt = np.load(tgt_poses_file)
         # Transform source camera poses: T_final @ pose_src
         poses_src_trans = np.matmul(final_T, poses_src)
-        combined_poses = np.concatenate([poses_src_trans, poses_tgt], axis=0)
-        np.save(args.output_dir / "camera_poses.npy", combined_poses)
-        print(f"  -> Saved combined camera_poses.npy ({len(combined_poses)} poses)")
+        combined_poses = np.concatenate([poses_src_trans, poses_tgt], axis=0).astype(np.float32)
+        np.save(args.output_dir / f"{merged_full_ply.stem}_poses.npy", combined_poses)
+        np.save(args.output_dir / f"{merged_5mm_ply.stem}_poses.npy", combined_poses)
+        np.save(args.output_dir / "mine_r3pm_net_poses.npy", combined_poses)
+        print(f"  -> Saved {merged_full_ply.stem}_poses.npy ({len(combined_poses)} poses, float32)")
 
     # Save JSON Report
     total_time = time.perf_counter() - t_start

@@ -30,6 +30,7 @@ import asyncio
 import copy
 import io
 import json
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -59,13 +60,16 @@ from abot_recon.preprocessing import preprocess_image
 @dataclass
 class StreamSession:
     session_id: str
+    scene_id: str = ""
+    robot: str = ""
+    folder_name: str = ""
     point_stride: int = 4
     frame_stride: int = 1
     voxel_size: float = 0.015
     confidence_threshold: float = 0.1
     save_ply: bool = True
     save_trajectory: bool = True
-
+    auto_fuse: bool = True
     # State tracking
     frame_counter: int = 0  # Total frames received
     processed_counter: int = 0  # Frames actually forwarded through model
@@ -85,6 +89,21 @@ class StreamSession:
     history_conf: List[torch.Tensor] = field(default_factory=list)
 
 
+    def __post_init__(self):
+        if not self.scene_id:
+            self.scene_id = self.session_id
+        if not self.robot:
+            import re
+            m = re.search(r"(robot_[a-z0-9]+|robot[a-z0-9]+|cam_[a-z0-9]+|camera_[a-z0-9]+)", self.session_id, re.IGNORECASE)
+            if m:
+                self.robot = m.group(1)
+            else:
+                self.robot = "robot"
+        if not self.folder_name:
+            t_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(self.created_at))
+            clean_scene = self.scene_id.replace(" ", "_")
+            clean_robot = self.robot.replace(" ", "_")
+            self.folder_name = f"{clean_scene}-{t_str}-{clean_robot}"
 # ---------------------------------------------------------------------------
 # Multi-Client Session Manager
 # ---------------------------------------------------------------------------
@@ -96,13 +115,18 @@ class MultiSessionReconstructionManager:
         checkpoint: str | Path = "checkpoints/abot_recon.safetensors",
         device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
         output_base_dir: Path = REPO_ROOT / "outputs/streams",
+        scenes_base_dir: Path = REPO_ROOT / "outputs/scenes",
     ):
         self.device = torch.device(device)
         self.output_base_dir = output_base_dir
         self.output_base_dir.mkdir(parents=True, exist_ok=True)
+        self.scenes_base_dir = scenes_base_dir
+        self.scenes_base_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, StreamSession] = {}
         self.gpu_lock = asyncio.Lock()
-
+        self.meta_lock = asyncio.Lock()
+        self.scene_locks: Dict[str, asyncio.Lock] = {}
+        self.scene_dirty: Dict[str, bool] = {}
         print(f"[Server Engine] Loading ABot-Recon model on {self.device}...")
         self.model = ABotRecon.from_pretrained(
             checkpoint,
@@ -122,24 +146,126 @@ class MultiSessionReconstructionManager:
         self.paged_template = self.network._paged_manager
         print("[Server Engine] Model initialized and paged KV cache template ready.")
 
+    def get_scene_metadata_path(self, scene_id: str) -> Path:
+        return self.scenes_base_dir / scene_id / "scene_metadata.json"
+
+    def get_scene_metadata(self, scene_id: str) -> Dict[str, Any]:
+        path = self.get_scene_metadata_path(scene_id)
+        meta = None
+        if path.is_file():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = None
+        now = time.time()
+        if meta is None:
+            meta = {
+                "scene_id": scene_id,
+                "created_at": now,
+                "updated_at": now,
+                "completed_sessions": [],
+                "active_sessions": [],
+                "fusion_status": "none",
+                "is_fused": False,
+                "total_points": 0,
+                "models": {},
+            }
+        # Dynamic disk sync to ensure zero-loss under high concurrency / simultaneous EOS
+        completed = set(meta.get("completed_sessions", []))
+        # Filter out symlinks or bare session_ids that alias across scenes
+        cleaned = set()
+        for s in completed:
+            sp = self.output_base_dir / s
+            if sp.is_symlink():
+                continue
+            cleaned.add(s)
+        completed = cleaned
+
+        if self.output_base_dir.is_dir():
+            for d in self.output_base_dir.iterdir():
+                if d.is_dir() and not d.is_symlink() and (d / "reconstruction.ply").is_file():
+                    sum_file = d / "session_summary.json"
+                    if sum_file.is_file():
+                        try:
+                            with open(sum_file, "r", encoding="utf-8") as sf:
+                                sdata = json.load(sf)
+                                if sdata.get("scene_id") == scene_id:
+                                    completed.add(d.name)
+                        except Exception:
+                            pass
+                    elif d.name.startswith(f"{scene_id}-") or d.name.startswith(f"{scene_id}_") or d.name == scene_id:
+                        completed.add(d.name)
+        meta["completed_sessions"] = sorted(list(completed))
+        return meta
+
+    def save_scene_metadata(self, scene_id: str, meta: Dict[str, Any]) -> None:
+        scene_dir = self.scenes_base_dir / scene_id
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        meta["updated_at"] = time.time()
+        with open(self.get_scene_metadata_path(scene_id), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+
+    def register_session_to_scene(self, session_id: str, scene_id: str) -> None:
+        meta = self.get_scene_metadata(scene_id)
+        if session_id not in meta["active_sessions"] and session_id not in meta["completed_sessions"]:
+            meta["active_sessions"].append(session_id)
+            self.save_scene_metadata(scene_id, meta)
+
+    async def schedule_scene_fusion(
+        self,
+        scene_id: str,
+        voxel_size: float = 0.015,
+        debounce_seconds: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Thread-safe and async-safe scene fusion coalescer for concurrent/simultaneous EOS."""
+        if scene_id not in self.scene_locks:
+            self.scene_locks[scene_id] = asyncio.Lock()
+
+        scene_lock = self.scene_locks[scene_id]
+        if scene_lock.locked():
+            self.scene_dirty[scene_id] = True
+            # Wait for active fusion to complete
+            async with scene_lock:
+                if not self.scene_dirty.get(scene_id, False):
+                    # Already updated by earlier fusion pass
+                    return self.get_scene_metadata(scene_id)
+                self.scene_dirty[scene_id] = False
+                return await self.fuse_scene(scene_id, voxel_size=voxel_size)
+
+        async with scene_lock:
+            if debounce_seconds > 0:
+                await asyncio.sleep(debounce_seconds)
+            self.scene_dirty[scene_id] = False
+            return await self.fuse_scene(scene_id, voxel_size=voxel_size)
+
     def get_or_create_session(
         self,
         session_id: str,
+        scene_id: Optional[str] = None,
+        robot: Optional[str] = None,
         point_stride: int = 4,
         frame_stride: int = 1,
         voxel_size: float = 0.015,
         confidence_threshold: float = 0.1,
         save_ply: bool = True,
         save_trajectory: bool = True,
+        auto_fuse: bool = True,
     ) -> StreamSession:
+        effective_scene_id = scene_id.strip() if scene_id and scene_id.strip() else session_id
         if session_id in self.sessions:
             session = self.sessions[session_id]
+            session.scene_id = effective_scene_id
+            if robot:
+                session.robot = robot.strip()
             session.point_stride = point_stride
             session.frame_stride = frame_stride
             session.voxel_size = voxel_size
             session.confidence_threshold = confidence_threshold
+            session.auto_fuse = auto_fuse
             session.is_active = True
             session.last_active = time.time()
+            self.register_session_to_scene(session_id, effective_scene_id)
             return session
 
         # Create fresh isolated paged manager
@@ -148,16 +274,20 @@ class MultiSessionReconstructionManager:
 
         session = StreamSession(
             session_id=session_id,
+            scene_id=effective_scene_id,
+            robot=robot.strip() if robot else "",
             point_stride=max(1, int(point_stride)),
             frame_stride=max(1, int(frame_stride)),
             voxel_size=max(0.0, float(voxel_size)),
             confidence_threshold=max(0.0, min(1.0, float(confidence_threshold))),
             save_ply=save_ply,
             save_trajectory=save_trajectory,
+            auto_fuse=auto_fuse,
             paged_manager=paged_mgr,
         )
         self.sessions[session_id] = session
-        print(f"[Session] Created new session [{session_id}] (total active: {len(self.sessions)})")
+        self.register_session_to_scene(session_id, effective_scene_id)
+        print(f"[Session] Created new session [{session_id}] for scene [{effective_scene_id}] (folder: {session.folder_name}, active: {len(self.sessions)})")
         return session
 
     async def process_frame(
@@ -281,8 +411,17 @@ class MultiSessionReconstructionManager:
         session = self.sessions[session_id]
         session.is_active = False
         t0 = time.time()
-        session_dir = self.output_base_dir / session_id
+        session_dir = self.output_base_dir / session.folder_name
         session_dir.mkdir(parents=True, exist_ok=True)
+        # Backward-compatible symlink if session_id != folder_name
+        if session.session_id != session.folder_name:
+            legacy_link = self.output_base_dir / session.session_id
+            try:
+                if legacy_link.is_symlink() or legacy_link.exists():
+                    legacy_link.unlink()
+                legacy_link.symlink_to(session.folder_name)
+            except Exception:
+                pass
 
         total_frames = len(session.history_points)
         print(f"\n[Finalize] Finalizing session [{session_id}] ({total_frames} frames)...")
@@ -345,11 +484,26 @@ class MultiSessionReconstructionManager:
             np.save(pose_path, poses_np)
             deliverables["trajectory_path"] = str(pose_path)
 
-        # 3. Save Summary JSON
+        # 3. Update Scene Association & Trigger Coalesced Fusion
+        scene_id = session.scene_id
+        async with self.meta_lock:
+            scene_meta = self.get_scene_metadata(scene_id)
+            if session_id in scene_meta["active_sessions"]:
+                scene_meta["active_sessions"].remove(session_id)
+            # Track the unique folder_name so multiple streams or scenes never collide
+            if session.folder_name not in scene_meta["completed_sessions"]:
+                scene_meta["completed_sessions"].append(session.folder_name)
+            if session_id in scene_meta["completed_sessions"]:
+                scene_meta["completed_sessions"].remove(session_id)
+            self.save_scene_metadata(scene_id, scene_meta)
+
+        # 4. Save Summary JSON (written before scene fusion so disk discovery finds it)
         elapsed = time.time() - session.created_at
         summary = {
             "type": "session_completed",
             "session_id": session_id,
+            "scene_id": scene_id,
+            "folder_name": session.folder_name,
             "created_at": session.created_at,
             "duration_seconds": round(elapsed, 2),
             "total_frames_received": session.frame_counter,
@@ -361,7 +515,23 @@ class MultiSessionReconstructionManager:
             "frame_stride": session.frame_stride,
             "avg_fps": round(session.processed_counter / elapsed, 2) if elapsed > 0 else 0.0,
             "deliverables": deliverables,
+            "scene_fusion": None,
+            "scene_download_url": f"/api/scenes/{scene_id}/reconstruction.ply",
         }
+        with open(session_dir / "session_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+
+        # 5. Trigger Coalesced Fusion
+        scene_fusion_res: Optional[Dict[str, Any]] = None
+        if session.auto_fuse:
+            try:
+                # Coalesce simultaneous endings into a single unified fusion pass
+                scene_fusion_res = await self.schedule_scene_fusion(scene_id, voxel_size=session.voxel_size, debounce_seconds=0.5)
+            except Exception as e:
+                print(f"[Scene Auto-Fusion Notice] Auto-fusion for scene [{scene_id}] deferred/failed: {e}")
+                scene_fusion_res = {"status": "auto_fuse_failed", "error": str(e)}
+
+        summary["scene_fusion"] = scene_fusion_res
         with open(session_dir / "session_summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
 
@@ -373,8 +543,151 @@ class MultiSessionReconstructionManager:
         session.paged_manager = None
         self.sessions.pop(session_id, None)
 
-        print(f"[Finalize] Session [{session_id}] finalized in {time.time() - t0:.2f}s! ({dedup_count:,} points)")
+        print(f"[Finalize] Session [{session_id}] finalized in {time.time() - t0:.2f}s! ({dedup_count:,} points) Scene [{scene_id}] updated.")
         return summary
+
+    async def fuse_scene(
+        self,
+        scene_id: str,
+        voxel_size: float = 0.015,
+        anchor: Optional[str] = None,
+        outputs: str = "normal,colored,transforms",
+    ) -> Dict[str, Any]:
+        """Fuse all completed streaming sessions belonging to scene_id."""
+        scene_dir = self.scenes_base_dir / scene_id
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        meta = self.get_scene_metadata(scene_id)
+        completed = meta.get("completed_sessions", [])
+
+        # Filter to sessions that have reconstruction.ply on disk
+        valid_sids = [
+            sid for sid in completed
+            if (self.output_base_dir / sid / "reconstruction.ply").is_file()
+        ]
+        if not valid_sids:
+            # Fallback check
+            for d in self.output_base_dir.iterdir():
+                if d.is_dir() and not d.is_symlink() and (d / "reconstruction.ply").is_file():
+                    if d.name.startswith(f"{scene_id}-") or d.name.startswith(f"{scene_id}_") or d.name == scene_id:
+                        valid_sids.append(d.name)
+        if not valid_sids:
+            raise ValueError(f"No completed sessions with point clouds found for scene '{scene_id}'")
+
+        meta["completed_sessions"] = valid_sids
+
+        # Case 1: Exactly 1 completed session for this scene -> Single stream baseline
+        if len(valid_sids) == 1:
+            sid = valid_sids[0]
+            src_ply = self.output_base_dir / sid / "reconstruction.ply"
+            dst_ply = scene_dir / "reconstruction.ply"
+            shutil.copyfile(src_ply, dst_ply)
+
+            src_traj = self.output_base_dir / sid / "camera_poses.npy"
+            if src_traj.is_file():
+                shutil.copyfile(src_traj, scene_dir / f"{sid}_poses.npy")
+                robot_tag = sid.split("-")[-1] if "-" in sid else sid
+                shutil.copyfile(src_traj, scene_dir / f"{robot_tag}_poses.npy")
+
+            pcd = o3d.io.read_point_cloud(str(dst_ply))
+            pt_count = len(pcd.points)
+            size_mb = round(dst_ply.stat().st_size / 1024 / 1024, 2)
+
+            meta["fusion_status"] = "single_stream"
+            meta["is_fused"] = False
+            meta["anchor_session"] = sid
+            meta["total_points"] = pt_count
+            meta["models"] = {
+                "reconstruction_ply": f"/api/scenes/{scene_id}/reconstruction.ply",
+                "ply_size_mb": size_mb,
+            }
+            self.save_scene_metadata(scene_id, meta)
+
+            return {
+                "status": "single_stream",
+                "scene_id": scene_id,
+                "message": f"Scene '{scene_id}' contains 1 video stream [{sid}]. Baseline reconstruction ready.",
+                "total_points": pt_count,
+                "ply_size_mb": size_mb,
+                "download_url": f"/api/scenes/{scene_id}/reconstruction.ply",
+            }
+
+        # Case 2: 2 or more completed sessions for this scene -> Method 2 Multimodal Fusion
+        print(f"\n[Scene Fusion] Fusing {len(valid_sids)} streams for scene [{scene_id}]: {valid_sids}...")
+        meta["fusion_status"] = "fusing"
+        self.save_scene_metadata(scene_id, meta)
+
+        recon_dirs = [self.output_base_dir / sid for sid in valid_sids]
+
+        # Verify required tensors
+        missing_tensors = [
+            sid for sid in valid_sids
+            if not (self.output_base_dir / sid / "world_points.pt").is_file()
+        ]
+        if missing_tensors:
+            raise ValueError(f"Sessions {missing_tensors} lack world_points.pt required for Method 2 fusion.")
+
+        from scripts.match_and_fuse_method2 import Method2FusionPipeline
+
+        async with self.gpu_lock:
+            loop = asyncio.get_event_loop()
+            def _run():
+                pipeline = Method2FusionPipeline(
+                    device=str(self.device),
+                    merge_voxel_size=voxel_size,
+                )
+                return pipeline.execute(
+                    inputs=recon_dirs,
+                    output_dir=scene_dir,
+                    outputs=outputs,
+                    anchor=anchor,
+                    prefix=scene_id,
+                )
+            result = await loop.run_in_executor(None, _run)
+
+        normal_merged = scene_dir / f"{scene_id}_normal_merged.ply"
+        colored_merged = scene_dir / f"{scene_id}_colored_merged.ply"
+        transforms_file = scene_dir / f"{scene_id}_transforms.json"
+
+        std_reconstruction = scene_dir / "reconstruction.ply"
+        std_colored = scene_dir / "reconstruction_colored.ply"
+        std_transforms = scene_dir / "transforms.json"
+
+        if normal_merged.is_file():
+            shutil.copyfile(normal_merged, std_reconstruction)
+        if colored_merged.is_file():
+            shutil.copyfile(colored_merged, std_colored)
+        if transforms_file.is_file():
+            shutil.copyfile(transforms_file, std_transforms)
+
+        pcd = o3d.io.read_point_cloud(str(std_reconstruction))
+        pt_count = len(pcd.points)
+        size_mb = round(std_reconstruction.stat().st_size / 1024 / 1024, 2)
+
+        meta["fusion_status"] = "fused"
+        meta["is_fused"] = True
+        meta["total_points"] = pt_count
+        meta["anchor_session"] = result.get("anchor", valid_sids[0])
+        meta["models"] = {
+            "reconstruction_ply": f"/api/scenes/{scene_id}/reconstruction.ply",
+            "reconstruction_colored_ply": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true",
+            "transforms_json": f"/api/scenes/{scene_id}/transforms.json",
+            "ply_size_mb": size_mb,
+        }
+        self.save_scene_metadata(scene_id, meta)
+
+        return {
+            "status": "fused",
+            "scene_id": scene_id,
+            "message": f"Successfully fused {len(valid_sids)} video streams for scene '{scene_id}'!",
+            "sessions": valid_sids,
+            "anchor_session": meta["anchor_session"],
+            "total_points": pt_count,
+            "ply_size_mb": size_mb,
+            "download_url": f"/api/scenes/{scene_id}/reconstruction.ply",
+            "download_colored_url": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true",
+            "transforms_url": f"/api/scenes/{scene_id}/transforms.json",
+            "fusion_details": result,
+        }
     async def fuse_sessions(
         self,
         session_ids: Optional[List[str]] = None,
@@ -453,12 +766,22 @@ def index():
     return {
         "service": "ABot-Recon Real-time Video Point Cloud Reconstruction Engine",
         "status": "online",
-        "websocket_endpoint": "/ws/stream?session_id=<id>&point_stride=4&voxel_size=0.015",
+        "websocket_endpoint": "/ws/stream?session_id=<id>&scene_id=<scene_id>&point_stride=4&voxel_size=0.015",
+        "scene_endpoints": {
+            "list_scenes": "GET /api/scenes",
+            "get_scene": "GET /api/scenes/{scene_id}",
+            "download_scene_ply": "GET /api/scenes/{scene_id}/reconstruction.ply[?colored=true]",
+            "trigger_scene_fusion": "POST /api/scenes/{scene_id}/fuse",
+            "download_scene_transforms": "GET /api/scenes/{scene_id}/transforms.json",
+        },
         "rest_endpoints": {
-            "start_session": "POST /api/stream/start",
-            "push_frame": "POST /api/stream/frame",
-            "end_session": "POST /api/stream/end",
+            "start_session": "POST /api/stream/start?session_id=<id>&scene_id=<scene_id>",
+            "push_frame": "POST /api/stream/frame?session_id=<id>",
+            "end_session": "POST /api/stream/end?session_id=<id>",
             "list_sessions": "GET /api/sessions",
+            "download_session_ply": "GET /api/streams/{session_id}/reconstruction.ply",
+            "multi_stream_fusion": "POST /api/fuse",
+            "list_fusions": "GET /api/fusions",
         },
     }
 
@@ -470,20 +793,26 @@ def index():
 async def websocket_stream(
     websocket: WebSocket,
     session_id: str = Query(..., description="Unique persistent identifier for this video stream"),
+    scene_id: Optional[str] = Query(None, description="Scene ID to group and fuse multiple video streams together"),
+    robot: Optional[str] = Query(None, description="Robot identifier (e.g. Robot_A, Robot_B) for '场景-时间戳-机器人' directory naming"),
     point_stride: int = Query(4, description="Subsample stride for points (4=8.8k, 2=35k, 1=141k)"),
     frame_stride: int = Query(1, description="Process 1 frame every N frames"),
     voxel_size: float = Query(0.015, description="Final spatial voxel grid size in meters"),
     confidence_threshold: float = Query(0.1, description="Confidence threshold for points [0, 1]"),
     include_points: bool = Query(True, description="Whether to include point coordinates in frame response"),
+    auto_fuse: bool = Query(True, description="Automatically fuse with existing completed streams in the same scene on EOS"),
 ):
     await websocket.accept()
     manager = get_manager()
     session = manager.get_or_create_session(
         session_id=session_id,
+        scene_id=scene_id,
+        robot=robot,
         point_stride=point_stride,
         frame_stride=frame_stride,
         voxel_size=voxel_size,
         confidence_threshold=confidence_threshold,
+        auto_fuse=auto_fuse,
     )
 
     # Initial handshake acknowledgement
@@ -491,13 +820,18 @@ async def websocket_stream(
         json.dumps({
             "type": "session_connected",
             "session_id": session_id,
+            "scene_id": session.scene_id,
+            "robot": session.robot,
+            "folder_name": session.folder_name,
             "status": "ready",
             "config": {
                 "point_stride": session.point_stride,
                 "frame_stride": session.frame_stride,
                 "voxel_size": session.voxel_size,
                 "confidence_threshold": session.confidence_threshold,
+                "auto_fuse": session.auto_fuse,
             },
+            "scene_download_url": f"/api/scenes/{session.scene_id}/reconstruction.ply",
             "end_stream_instruction": "Send text '{\"type\": \"EOS\"}' or binary token b'EOS\\x00\\x00' or close socket",
         })
     )
@@ -580,28 +914,40 @@ async def websocket_stream(
 @app.post("/api/stream/start")
 def start_session(
     session_id: str = Query(...),
+    scene_id: Optional[str] = Query(None, description="Scene ID to associate this stream with"),
+    robot: Optional[str] = Query(None, description="Robot ID/Name, e.g. Robot_A, Robot_B"),
     point_stride: int = Query(4),
     frame_stride: int = Query(1),
     voxel_size: float = Query(0.015),
     confidence_threshold: float = Query(0.1),
+    auto_fuse: bool = Query(True, description="Whether to auto-fuse when this stream ends"),
 ):
     """Initialize a new persistent streaming session."""
     manager = get_manager()
     session = manager.get_or_create_session(
         session_id=session_id,
+        scene_id=scene_id,
+        robot=robot,
         point_stride=point_stride,
         frame_stride=frame_stride,
         voxel_size=voxel_size,
         confidence_threshold=confidence_threshold,
+        auto_fuse=auto_fuse,
     )
     return {
         "status": "session_started",
         "session_id": session.session_id,
+        "scene_id": session.scene_id,
+        "robot": session.robot,
+        "folder_name": session.folder_name,
+        "scene_download_url": f"/api/scenes/{session.scene_id}/reconstruction.ply",
+        "stream_download_url": f"/api/streams/{session.folder_name}/reconstruction.ply",
         "config": {
             "point_stride": session.point_stride,
             "frame_stride": session.frame_stride,
             "voxel_size": session.voxel_size,
             "confidence_threshold": session.confidence_threshold,
+            "auto_fuse": session.auto_fuse,
         },
     }
 
@@ -661,13 +1007,19 @@ def list_sessions():
 
 @app.get("/api/streams/{session_id}/reconstruction.ply")
 def download_session_ply(session_id: str):
-    """Download the generated PLY file for a completed session."""
+    """Download the generated PLY file for a completed session (supports session_id or folder_name)."""
     manager = get_manager()
-    ply = manager.output_base_dir / session_id / "reconstruction.ply"
+    target_dir = manager.output_base_dir / session_id
+    if not target_dir.is_dir():
+        # Match by folder_name or suffix
+        for d in manager.output_base_dir.iterdir():
+            if d.is_dir() and (d.name == session_id or d.name.endswith(f"-{session_id}")):
+                target_dir = d
+                break
+    ply = target_dir / "reconstruction.ply"
     if not ply.is_file():
         raise HTTPException(status_code=404, detail=f"PLY not found for session '{session_id}'")
-    return FileResponse(str(ply), media_type="application/octet-stream", filename=f"{session_id}_reconstruction.ply")
-
+    return FileResponse(str(ply), media_type="application/octet-stream", filename=f"{target_dir.name}_reconstruction.ply")
 
 
 @app.post("/api/fuse")
@@ -728,6 +1080,127 @@ def download_fusion_file(fusion_id: str, filename: str):
         raise HTTPException(status_code=404, detail="Fusion deliverable not found")
     return FileResponse(str(fpath), media_type="application/octet-stream", filename=filename)
 
+
+
+# ---------------------------------------------------------------------------
+# 3. Scene Management & Fused Multi-Stream Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/scenes")
+def list_scenes():
+    """List all registered scenes, their component sessions, and fusion deliverables."""
+    manager = get_manager()
+    scenes_dir = manager.scenes_base_dir
+    results = []
+    if scenes_dir.is_dir():
+        for d in sorted(scenes_dir.iterdir()):
+            if d.is_dir():
+                meta = manager.get_scene_metadata(d.name)
+                ply = d / "reconstruction.ply"
+                colored_ply = d / "reconstruction_colored.ply"
+                results.append({
+                    "scene_id": d.name,
+                    "fusion_status": meta.get("fusion_status", "none"),
+                    "is_fused": meta.get("is_fused", False),
+                    "completed_sessions": meta.get("completed_sessions", []),
+                    "active_sessions": [
+                        sid for sid, s in manager.sessions.items()
+                        if getattr(s, "scene_id", "") == d.name
+                    ],
+                    "total_points": meta.get("total_points", 0),
+                    "ply_exists": ply.is_file(),
+                    "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2) if ply.is_file() else None,
+                    "colored_ply_exists": colored_ply.is_file(),
+                    "download_url": f"/api/scenes/{d.name}/reconstruction.ply" if ply.is_file() else None,
+                    "download_colored_url": f"/api/scenes/{d.name}/reconstruction.ply?colored=true" if colored_ply.is_file() else None,
+                    "transforms_url": f"/api/scenes/{d.name}/transforms.json" if (d / "transforms.json").is_file() else None,
+                    "updated_at": meta.get("updated_at"),
+                })
+    return {"scenes": results}
+
+
+@app.get("/api/scenes/{scene_id}")
+def get_scene_info(scene_id: str):
+    """Get detailed status, component streams, and download links for a specific scene."""
+    manager = get_manager()
+    meta = manager.get_scene_metadata(scene_id)
+    scene_dir = manager.scenes_base_dir / scene_id
+    if not scene_dir.is_dir() and not meta.get("completed_sessions") and not meta.get("active_sessions"):
+        raise HTTPException(status_code=404, detail=f"Scene '{scene_id}' not found")
+
+    ply = scene_dir / "reconstruction.ply"
+    colored_ply = scene_dir / "reconstruction_colored.ply"
+    transforms = scene_dir / "transforms.json"
+
+    meta["active_sessions"] = [
+        sid for sid, s in manager.sessions.items()
+        if getattr(s, "scene_id", "") == scene_id
+    ]
+    meta["deliverables"] = {
+        "reconstruction_ply": f"/api/scenes/{scene_id}/reconstruction.ply" if ply.is_file() else None,
+        "colored_ply": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true" if colored_ply.is_file() else None,
+        "transforms_json": f"/api/scenes/{scene_id}/transforms.json" if transforms.is_file() else None,
+    }
+    return meta
+
+
+@app.get("/api/scenes/{scene_id}/reconstruction.ply")
+async def download_scene_ply(
+    scene_id: str,
+    colored: bool = Query(False, description="Whether to download distinctly color-coded point cloud"),
+):
+    """Download the unified 3D point cloud model for a scene (auto-fuses multi-stream if needed)."""
+    manager = get_manager()
+    scene_dir = manager.scenes_base_dir / scene_id
+    target_name = "reconstruction_colored.ply" if colored else "reconstruction.ply"
+    ply_path = scene_dir / target_name
+
+    # If file not yet on disk, attempt generation if completed sessions exist
+    if not ply_path.is_file():
+        meta = manager.get_scene_metadata(scene_id)
+        if meta.get("completed_sessions"):
+            try:
+                await manager.fuse_scene(scene_id)
+            except Exception as e:
+                print(f"[Download Fusion Error] Failed auto-generating scene [{scene_id}]: {e}")
+
+    # Fallback to standard reconstruction.ply if colored was requested but not generated
+    if not ply_path.is_file() and colored:
+        ply_path = scene_dir / "reconstruction.ply"
+
+    if not ply_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Reconstruction model not found for scene '{scene_id}'. Push video streams to this scene first.",
+        )
+
+    out_name = f"{scene_id}_colored.ply" if (colored and "colored" in ply_path.name) else f"{scene_id}_reconstruction.ply"
+    return FileResponse(str(ply_path), media_type="application/octet-stream", filename=out_name)
+
+
+@app.post("/api/scenes/{scene_id}/fuse")
+async def trigger_scene_fusion(
+    scene_id: str,
+    voxel_size: float = Query(0.015, description="Spatial voxel size in meters for de-duplication"),
+    anchor: Optional[str] = Query(None, description="Anchor stream session ID (default: auto)"),
+):
+    """Explicitly trigger or re-run multi-stream multimodal fusion across all streams in this scene."""
+    manager = get_manager()
+    try:
+        res = await manager.fuse_scene(scene_id=scene_id, voxel_size=voxel_size, anchor=anchor)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/scenes/{scene_id}/transforms.json")
+def download_scene_transforms(scene_id: str):
+    """Download the coordinate alignment transformations and scale factors for each stream in this scene."""
+    manager = get_manager()
+    scene_dir = manager.scenes_base_dir / scene_id
+    tf_path = scene_dir / "transforms.json"
+    if not tf_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Transforms JSON not found for scene '{scene_id}'")
+    return FileResponse(str(tf_path), media_type="application/json", filename=f"{scene_id}_transforms.json")
 def main() -> None:
     parser = argparse.ArgumentParser(description="ABot-Recon Real-time Video Stream API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0")

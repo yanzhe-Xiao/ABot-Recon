@@ -405,7 +405,7 @@
       </div>
 
       <div class="control-group">
-        <label style="font-size:12px; color:var(--text-muted);">📹 选择视频流序列 (Video Sequence)</label>
+        <label style="font-size:12px; color:var(--text-muted);">📹 选择建图数据源 (outputs 点云或视频流)</label>
         <select id="stream-sequence-select">
           <option value="data/data/05" selected>📹 视频流 05 (A-B-C-B-A 循环全景 - 643 帧)</option>
           <option value="data/data/06">📹 视频流 06 (C-D 右侧视角 - 307 帧)</option>
@@ -443,6 +443,7 @@
 
       <div class="control-group" style="margin-top:4px;">
         <button class="btn-stream" id="btn-stream-toggle">▶️ 启动实时流式建图 (全部完整视频流)</button>
+        <button class="view-btn" id="btn-stream-quick-view" style="margin-top:4px; display:none; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.4); color:#93c5fd;">👁️ 直接加载预览选中点云</button>
       </div>
 
       <div class="control-group" style="margin-top:2px;">
@@ -588,6 +589,11 @@
       <span id="hud-frame-tag">000000.png</span>
     </div>
     <img id="hud-img" src="/examples/images/000000.png" alt="Live Camera Feed">
+    <div class="hud-controls" id="hud-controls" style="display:none; padding:4px 8px; background:rgba(15,23,42,0.9); border-top:1px solid rgba(255,255,255,0.1); align-items:center; justify-content:space-between; gap:6px; font-size:11px;">
+      <button id="btn-hud-play" style="background:rgba(56,189,248,0.2); border:1px solid rgba(56,189,248,0.5); border-radius:4px; color:#38bdf8; cursor:pointer; font-size:11px; padding:2px 6px;">▶️ 播放</button>
+      <input type="range" id="hud-frame-slider" min="0" max="0" value="0" style="flex:1; height:4px; cursor:pointer;">
+      <span id="hud-frame-count" style="color:#94a3b8; min-width:36px; text-align:right;">0/0</span>
+    </div>
   </div>
 
   <!-- 底部操作快捷指南 -->
@@ -616,6 +622,12 @@
     let voxelMap = new Map();
     let allPositions = [];
     let allColors = [];
+
+    let loadedTrajectoryMatrices = [];
+    let currentVideoPath = null;
+    let videoTotalFrames = 0;
+    let hudPlayInterval = null;
+    let isHudPlaying = false;
 
     const container = document.getElementById('canvas-container');
 
@@ -809,11 +821,28 @@
     function updateStreamButtonLabel() {
       const maxFrames = parseInt(document.getElementById('stream-max-frames').value, 10);
       const btn = document.getElementById('btn-stream-toggle');
+      const quickBtn = document.getElementById('btn-stream-quick-view');
+      const sel = document.getElementById('stream-sequence-select');
+      const val = sel ? sel.value : '';
+      const isPly = val.endsWith('.ply');
+
+      if (quickBtn) {
+        quickBtn.style.display = isPly ? 'block' : 'none';
+      }
+
       if (!isStreaming && btn) {
-        if (maxFrames === 0) {
-          btn.innerText = `▶️ 启动实时流式建图 (全部完整视频流)`;
+        if (isPly) {
+          if (maxFrames === 0) {
+            btn.innerText = `▶️ 启动实时流式建图 (完整点云流)`;
+          } else {
+            btn.innerText = `▶️ 启动实时流式建图 (前 ${maxFrames} 帧点云流)`;
+          }
         } else {
-          btn.innerText = `▶️ 启动实时流式建图 (前 ${maxFrames} 帧)`;
+          if (maxFrames === 0) {
+            btn.innerText = `▶️ 启动实时流式建图 (全部完整视频流)`;
+          } else {
+            btn.innerText = `▶️ 启动实时流式建图 (前 ${maxFrames} 帧)`;
+          }
         }
       }
     }
@@ -960,51 +989,200 @@
         throw new Error("Invalid NPY format");
       }
       const major = u8[6];
-      let offset = 10 + (u8[8] | (u8[9] << 8));
+      const headerOffset = major >= 2 ? 12 : 10;
+      let headerLen = u8[8] | (u8[9] << 8);
       if (major >= 2) {
-        offset = 12 + (u8[8] | (u8[9] << 8) | (u8[10] << 16) | (u8[11] << 24));
+        headerLen = (u8[8] | (u8[9] << 8) | (u8[10] << 16) | (u8[11] << 24)) >>> 0;
       }
-      return new Float32Array(buffer.slice(offset));
+      const dataOffset = headerOffset + headerLen;
+      const headerStr = new TextDecoder('latin1').decode(u8.subarray(headerOffset, dataOffset));
+
+      const descrMatch = headerStr.match(/'descr'\s*:\s*'([^']+)'/);
+      const descr = descrMatch ? descrMatch[1] : '<f4';
+
+      if (descr.includes('f8') || descr.includes('float64')) {
+        const f64 = new Float64Array(buffer.slice(dataOffset));
+        const f32 = new Float32Array(f64.length);
+        for (let i = 0; i < f64.length; i++) {
+          f32[i] = f64[i];
+        }
+        return f32;
+      } else {
+        return new Float32Array(buffer.slice(dataOffset));
+      }
     }
 
     async function loadTrajectory(url) {
       trajectoryGroup.clear();
-      try {
-        const trajUrl = url.replace('reconstruction.ply', 'camera_poses.npy');
-        const resp = await fetch(trajUrl);
-        if (!resp.ok) return;
+      loadedTrajectoryMatrices = [];
+      const candidates = [];
 
-        const buffer = await resp.arrayBuffer();
-        const floatData = parseNpy(buffer);
-        const numPoses = floatData.length / 16;
+      // 1. Specific pose files derived directly from the model filename
+      candidates.push(url.replace(/\.ply$/i, '_poses.npy'));
+      candidates.push(url.replace(/\.ply$/i, '_camera_poses.npy'));
+      candidates.push(url.replace(/\.ply$/i, '.poses.npy'));
 
-        const points = [];
-        for (let i = 0; i < numPoses; i++) {
-          const off = i * 16;
-          const mat = new THREE.Matrix4().set(
-            floatData[off], floatData[off+1], floatData[off+2], floatData[off+3],
-            floatData[off+4], floatData[off+5], floatData[off+6], floatData[off+7],
-            floatData[off+8], floatData[off+9], floatData[off+10], floatData[off+11],
-            0, 0, 0, 1
-          );
-          const pos = new THREE.Vector3(floatData[off+3], floatData[off+7], floatData[off+11]);
-          points.push(pos);
+      // 2. Only if the PLY is a reconstruction file (e.g. reconstruction.ply),
+      // check the standard sequence reconstruction pose candidates in its directory
+      const isReconstruction = /reconstruction/i.test(url);
+      const parentDir = url.substring(0, url.lastIndexOf('/') + 1);
+      if (isReconstruction) {
+        candidates.push(url.replace(/reconstruction.*\.ply$/i, 'camera_poses.npy'));
+        candidates.push(url.replace(/reconstruction.*\.ply$/i, 'camera_poses_loop.npy'));
+        candidates.push(url.replace(/reconstruction.*\.ply$/i, 'camera_poses_noloop.npy'));
+        candidates.push(parentDir + 'camera_poses.npy');
+        candidates.push(parentDir + 'camera_poses_loop.npy');
+        candidates.push(parentDir + 'camera_poses_noloop.npy');
+      }
 
-          if (i % 2 === 0 || i === numPoses - 1) {
-            const isFirstOrLast = (i === 0 || i === numPoses - 1);
-            const frustum = createCameraFrustum(0.04, isFirstOrLast ? 0xf59e0b : 0x38bdf8);
-            frustum.matrixAutoUpdate = false;
-            frustum.matrix.copy(mat);
-            trajectoryGroup.add(frustum);
+      for (const trajUrl of candidates) {
+        try {
+          const resp = await fetch(trajUrl);
+          if (!resp.ok) continue;
+
+          const buffer = await resp.arrayBuffer();
+          const floatData = parseNpy(buffer);
+          const numPoses = Math.floor(floatData.length / 16);
+          if (numPoses <= 0) continue;
+
+          const points = [];
+          const frustumStride = numPoses > 150 ? Math.ceil(numPoses / 60) : 2;
+          for (let i = 0; i < numPoses; i++) {
+            const off = i * 16;
+
+            // Verify that all matrix values are finite and within reasonable spatial coordinates
+            let isValid = true;
+            for (let k = 0; k < 16; k++) {
+              const val = floatData[off + k];
+              if (!Number.isFinite(val) || Math.abs(val) > 1e4) {
+                isValid = false;
+                break;
+              }
+            }
+            if (!isValid) continue;
+
+            const mat = new THREE.Matrix4().set(
+              floatData[off], floatData[off+1], floatData[off+2], floatData[off+3],
+              floatData[off+4], floatData[off+5], floatData[off+6], floatData[off+7],
+              floatData[off+8], floatData[off+9], floatData[off+10], floatData[off+11],
+              0, 0, 0, 1
+            );
+            loadedTrajectoryMatrices.push(mat);
+            const pos = new THREE.Vector3(floatData[off+3], floatData[off+7], floatData[off+11]);
+            points.push(pos);
+
+            if (i % frustumStride === 0 || i === numPoses - 1) {
+              const isFirstOrLast = (i === 0 || i === numPoses - 1);
+              const frustum = createCameraFrustum(0.04, isFirstOrLast ? 0xf59e0b : 0x38bdf8);
+              frustum.matrixAutoUpdate = false;
+              frustum.matrix.copy(mat);
+              trajectoryGroup.add(frustum);
+            }
           }
-        }
 
-        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-        const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
-        const line = new THREE.Line(lineGeo, lineMat);
-        trajectoryGroup.add(line);
-      } catch (err) {
-        console.warn("未找到轨迹数据或解析失败:", err);
+          if (points.length > 0) {
+            const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
+            const line = new THREE.Line(lineGeo, lineMat);
+            trajectoryGroup.add(line);
+          }
+          break;
+        } catch (err) {
+          // continue to next candidate
+        }
+      }
+    }
+
+    function syncCameraPoseToFrame(frameIndex) {
+      if (!liveCameraFrustum || !loadedTrajectoryMatrices || loadedTrajectoryMatrices.length === 0) return;
+      const pIdx = Math.min(frameIndex, loadedTrajectoryMatrices.length - 1);
+      const mat = loadedTrajectoryMatrices[pIdx];
+      liveCameraFrustum.visible = true;
+      liveCameraFrustum.matrixAutoUpdate = false;
+      liveCameraFrustum.matrix.copy(mat);
+    }
+
+    async function checkAndSetupVideoHUD(modelPath) {
+      if (hudPlayInterval) {
+        clearInterval(hudPlayInterval);
+        hudPlayInterval = null;
+        isHudPlaying = false;
+        const btn = document.getElementById('btn-hud-play');
+        if (btn) btn.innerText = '▶️ 播放';
+      }
+
+      const hudControls = document.getElementById('hud-controls');
+      const hudImg = document.getElementById('hud-img');
+      const hudTag = document.getElementById('hud-frame-tag');
+      const slider = document.getElementById('hud-frame-slider');
+      const countLabel = document.getElementById('hud-frame-count');
+
+      try {
+        const cleanPath = modelPath.startsWith('/') ? modelPath.slice(1) : modelPath;
+        const resp = await fetch(`/api/video_info?path=${encodeURIComponent(cleanPath)}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.has_video && data.total_frames > 0) {
+          currentVideoPath = cleanPath;
+          videoTotalFrames = data.total_frames;
+          if (hudControls) hudControls.style.display = 'flex';
+          if (slider) {
+            slider.max = data.total_frames - 1;
+            slider.value = 0;
+          }
+          if (countLabel) countLabel.innerText = `1/${data.total_frames}`;
+          if (hudTag) hudTag.innerText = `帧 #1 / ${data.total_frames} (${data.format === 'colors.pt' ? 'colors.pt 视频流' : '图像帧'})`;
+          if (hudImg) hudImg.src = `/api/frame?path=${encodeURIComponent(cleanPath)}&frame=0`;
+        } else {
+          currentVideoPath = null;
+          videoTotalFrames = 0;
+          if (hudControls) hudControls.style.display = 'none';
+        }
+      } catch (e) {
+        console.warn("Failed to check video info:", e);
+      }
+    }
+
+    function setupHudControls() {
+      const slider = document.getElementById('hud-frame-slider');
+      const playBtn = document.getElementById('btn-hud-play');
+      const hudImg = document.getElementById('hud-img');
+      const hudTag = document.getElementById('hud-frame-tag');
+      const countLabel = document.getElementById('hud-frame-count');
+
+      if (slider) {
+        slider.addEventListener('input', (e) => {
+          if (!currentVideoPath) return;
+          const f = parseInt(e.target.value, 10);
+          if (hudImg) hudImg.src = `/api/frame?path=${encodeURIComponent(currentVideoPath)}&frame=${f}`;
+          if (hudTag) hudTag.innerText = `帧 #${f + 1} / ${videoTotalFrames} (视频流)`;
+          if (countLabel) countLabel.innerText = `${f + 1}/${videoTotalFrames}`;
+          syncCameraPoseToFrame(f);
+        });
+      }
+
+      if (playBtn) {
+        playBtn.addEventListener('click', () => {
+          if (!currentVideoPath || videoTotalFrames <= 1) return;
+          if (isHudPlaying) {
+            clearInterval(hudPlayInterval);
+            hudPlayInterval = null;
+            isHudPlaying = false;
+            playBtn.innerText = '▶️ 播放';
+          } else {
+            isHudPlaying = true;
+            playBtn.innerText = '⏸️ 暂停';
+            hudPlayInterval = setInterval(() => {
+              let f = parseInt(slider.value, 10) + 1;
+              if (f >= videoTotalFrames) f = 0;
+              slider.value = f;
+              if (hudImg) hudImg.src = `/api/frame?path=${encodeURIComponent(currentVideoPath)}&frame=${f}`;
+              if (hudTag) hudTag.innerText = `帧 #${f + 1} / ${videoTotalFrames} (视频流播放中)`;
+              if (countLabel) countLabel.innerText = `${f + 1}/${videoTotalFrames}`;
+              syncCameraPoseToFrame(f);
+            }, 100);
+          }
+        });
       }
     }
 
@@ -1116,6 +1294,7 @@
         }
 
         await loadTrajectory(url);
+        await checkAndSetupVideoHUD(url);
         resetView();
         showToast(`✅ 已成功加载 ${parsed.vertexCount.toLocaleString()} 个三维空间点`);
       } catch (err) {
@@ -1213,8 +1392,31 @@
       document.getElementById('voxel-size-val').innerText = `${(v * 100).toFixed(1)} cm`;
     });
 
-    document.getElementById('stream-sequence-select').addEventListener('change', updateStreamButtonLabel);
+    document.getElementById('stream-sequence-select').addEventListener('change', (e) => {
+      updateStreamButtonLabel();
+      checkAndSetupVideoHUD(e.target.value);
+    });
     document.getElementById('stream-max-frames').addEventListener('change', updateStreamButtonLabel);
+    const quickBtn = document.getElementById('btn-stream-quick-view');
+    if (quickBtn) {
+      quickBtn.addEventListener('click', () => {
+        const sel = document.getElementById('stream-sequence-select');
+        if (sel && sel.value) {
+          const url = sel.value.startsWith('/') ? sel.value : '/' + sel.value;
+          const modelSel = document.getElementById('model-select');
+          if (modelSel) {
+            for (let opt of modelSel.options) {
+              if (opt.value === url) {
+                modelSel.value = url;
+                break;
+              }
+            }
+          }
+          loadPLYFromUrl(url);
+        }
+      });
+    }
+
 
     document.getElementById('model-select').addEventListener('change', (e) => {
       loadPLYFromUrl(e.target.value);
@@ -1244,6 +1446,7 @@
       }
     });
 
+      setupHudControls();
     document.getElementById('point-size').addEventListener('input', (e) => {
       const val = parseFloat(e.target.value);
       document.getElementById('point-size-val').innerText = val.toFixed(3);
@@ -1300,11 +1503,20 @@
           if (seqs && seqs.length > 0) {
             const sel = document.getElementById('stream-sequence-select');
             sel.innerHTML = '';
+            const groups = {};
             seqs.forEach(item => {
+              const cat = item.category || '其它数据源';
+              if (!groups[cat]) {
+                const grp = document.createElement('optgroup');
+                grp.label = cat;
+                groups[cat] = grp;
+                sel.appendChild(grp);
+              }
               const opt = document.createElement('option');
               opt.value = item.id;
-              opt.innerText = `${item.name}`;
-              sel.appendChild(opt);
+              opt.innerText = item.name;
+              if (item.type) opt.dataset.type = item.type;
+              groups[cat].appendChild(opt);
             });
             updateStreamButtonLabel();
           }
@@ -1317,14 +1529,30 @@
           if (models && models.length > 0) {
             const sel = document.getElementById('model-select');
             sel.innerHTML = '';
+            const groups = {};
             models.forEach(m => {
+              const cat = m.category || '全部点云模型';
+              if (!groups[cat]) {
+                const grp = document.createElement('optgroup');
+                grp.label = cat;
+                groups[cat] = grp;
+                sel.appendChild(grp);
+              }
               const opt = document.createElement('option');
               opt.value = m.url;
               opt.innerText = m.name;
-              sel.appendChild(opt);
+              groups[cat].appendChild(opt);
             });
             if (sel.options.length > 0) {
-              loadPLYFromUrl(sel.options[0].value);
+              let defaultOpt = sel.options[0];
+              for (let opt of sel.options) {
+                if (opt.value.includes('data_05_08_method2_merged.ply') && !opt.value.includes('colored') && !opt.value.includes('full')) {
+                  defaultOpt = opt;
+                  break;
+                }
+              }
+              sel.value = defaultOpt.value;
+              loadPLYFromUrl(defaultOpt.value);
             }
           }
         })

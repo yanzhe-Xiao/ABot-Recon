@@ -49,13 +49,14 @@ ABot-Recon 神经流式建图模型（约 1.9GB 显存，bf16）作为只读共�
 
 | 参数字段 | 类型 | 默认值 | 说明与调节建议 |
 | :--- | :--- | :--- | :--- |
-| **`session_id`** | `str` | *必填* | 客户端会话唯一 ID（如 `cam_01`, `robot_front`），用于区分不同视频流 |
+| **`session_id`** | `str` | *必填* | 客户端单路流会话唯一 ID（如 `cam_01`, `robot_front`），用于底层推流与会话隔离 |
+| **`scene_id`** | `str` | `session_id` | **所属场景唯一 ID**（如 `corridor_hall`, `building_1f`）。不同时间先后接入的视频流指定相同 `scene_id` 即可自动汇聚到同一场景 |
+| **`auto_fuse`** | `bool` | `true` | 当该视频流结束时，若同一场景内已存在其他已完成视频流，是否**自动触发方案二多模态全局融合** |
 | **`point_stride`** | `int` | `4` | **点采样步长**：`4`（每帧 ~8.8k 点，推荐，延迟低流畅）；`2`（每帧 ~3.5万点）；`1`（每帧 14.1万全分辨率高精度） |
 | **`frame_stride`** | `int` | `1` | **时间抽帧步长**：`1` 逐帧处理；`2` 每隔 1 帧处理一次（处理 30 FPS 高帧率视频时可降低服务器负载） |
 | **`voxel_size`** | `float` | `0.015` | **最终导出的体素网格大小**（单位米，如 `0.015` 表示 1.5cm 体素滤波，消除多帧重影；传 `0` 表示不去重） |
 | **`confidence_threshold`** | `float` | `0.1` | **置信度阈值**（`0.0 ~ 1.0`）：滤除低置信度噪点与飞点 |
 | **`include_points`** | `bool` | `true` | 是否在每帧的实时响应中返回三维坐标和 RGB 数组（若为 `false` 则只回传相机位姿与统计，节省下行带宽） |
-
 ---
 
 ## 三、 视频流结束（End-of-Stream, EOS）协议定义
@@ -122,7 +123,38 @@ POST /api/stream/end?session_id=cam_01
 
 ---
 
-## 五、 客户端调用示例代码 (Python)
+---
+
+## 五、 多视频流先后接入与统一场景融合建图机制 (Scene-Based Fusion)
+
+针对“**多个视频流属于同一物理场景、但在不同时刻先后接入**”的应用需求，系统现已全面升级**场景级（Scene-Level）聚合与融合机制**：
+
+```
+时刻 T1: 视频流 A (session_id=cam_A, scene_id=room_01) 接入 ──► 构建首段点云，确立基准坐标系 ──► 下载 /api/scenes/room_01/reconstruction.ply (此时含流 A)
+                                                                                                          ▲
+时刻 T2: 视频流 B (session_id=cam_B, scene_id=room_01) 接入 ──► 独立推断结束 ──► 触发多模态自动配准融合 ────────┤ (更新为 A+B 融合全景点云)
+                                                                                                          ▲
+时刻 T3: 视频流 N (session_id=cam_N, scene_id=room_01) 接入 ──► 独立推断结束 ──► 触发多模态增量配准融合 ────────┘ (更新为 A+B+...+N 超高清全景)
+```
+
+### 1. 核心特性
+1. **解耦传输与流式隔离**：各视频流不论是同时传、错峰传、还是间隔数小时传输，流式服务内部计算状态完全独立，保证各流自回归跟踪位姿的纯净度；
+2. **零配置增量融合**：同场景第二路及后续视频流传输完毕（EOS）时，服务端自动识别重叠纹理与空间点集，运用 `ALIKED + LightGlue + Umeyama (Sim(3)) + small_gicp` 算法推算旋转、平移与绝对尺度缩放系数，直接将多路点云无缝融合；
+3. **统一场景下载端点**：上层业务系统无需记录各视频流细节，**直接使用场景 ID 即可统一获取该场景当前最新的融合点云模型**；
+4. **前端无缝呈现**：已融合的场景点云会自动注册至 8088 端口的三维交互前端（`多视频流场景融合点云 (Multi-Stream Scenes)` 分组下），可随时交互巡检。
+
+### 2. 场景相关 HTTP REST 接口
+
+| HTTP 方法 | 接口路径 | 功能说明 |
+| :--- | :--- | :--- |
+| `GET` | `/api/scenes` | 列出全部已创建的场景列表、包含的视频流数量与当前融合状态 |
+| `GET` | `/api/scenes/{scene_id}` | 获取特定场景的详细统计信息、包含会话列表与交付文件清单 |
+| `GET` | `/api/scenes/{scene_id}/reconstruction.ply` | **直接按场景 ID 下载统一融合后的 3D 点云**（真彩色） |
+| `GET` | `/api/scenes/{scene_id}/reconstruction.ply?colored=true` | **直接按场景 ID 下载多色区分点云**（各视频流赋予红/绿/蓝等高对比色） |
+| `POST` | `/api/scenes/{scene_id}/fuse?voxel_size=0.015` | 显式手动触发或重新运行该场景下所有已完成视频流的融合对齐 |
+| `GET` | `/api/scenes/{scene_id}/transforms.json` | 下载该场景下各视频流相对基准坐标系的 Sim(3) 尺度因子与 4x4 变换矩阵 |
+
+## 六、 客户端调用示例代码 (Python)
 
 ### 1. WebSocket 双向流式传输客户端示例
 
@@ -169,7 +201,7 @@ asyncio.run(run_camera_stream())
 
 ---
 
-## 六、 REST HTTP 接口概览（非 WebSocket 备用通道）
+## 七、 REST HTTP 接口概览（非 WebSocket 备用通道）
 
 对于不支持 WebSocket 的 HTTP 客户端，服务同样提供了标准 REST 接口：
 
@@ -186,7 +218,7 @@ asyncio.run(run_camera_stream())
 
 ---
 
-## 七、 多客户端并发实测验证
+## 八、 多客户端并发与时序融合实测验证
 
 通过 `scripts/test_stream_client.py` 模拟 **两台摄像机（`cam_alpha` 与 `cam_beta`）以不同采样步长和体素大小并发推流**：
 - **`cam_alpha`**：输入视频 06，参数 `point_stride=4, voxel_size=0.015m`，结束时发送 JSON `{"type": "EOS"}`；
