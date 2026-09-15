@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 3D Point Cloud Reconstruction with Dynamic Object Removal (Scheme 1: 2D Semantic Masking).
-Integrates YOLO-seg with ABot-Recon monocular streaming 3D reconstruction.
+Integrates YOLO-seg with ABot-Recon monocular streaming 3D reconstruction with EXACT pixel alignment.
 """
 
 from __future__ import annotations
@@ -25,15 +25,18 @@ from abot_recon.preprocessing import preprocess_image
 from scripts.export_reconstruction_ply import write_binary_ply
 
 
-class DynamicMaskGenerator:
-    """Generates dynamic object masks using YOLO-seg with morphological dilation."""
+class AlignedDynamicMaskGenerator:
+    """
+    Generates dynamic object masks directly on preprocessed [H, W, 3] tensors,
+    ensuring 100% pixel-perfect alignment with ABot-Recon pointmaps.
+    """
 
     def __init__(
         self,
-        model_name: str = "yolo11n-seg.pt",
+        model_name: str = "yolo11m-seg.pt",
         dynamic_classes: list[int] | None = None,
-        conf_thresh: float = 0.25,
-        dilate_kernel: int = 7,
+        conf_thresh: float = 0.15,
+        dilate_kernel: int = 11,
         device: str = "cuda",
     ):
         self.model = YOLO(model_name)
@@ -43,17 +46,16 @@ class DynamicMaskGenerator:
         self.dilate_kernel = dilate_kernel
         self.device = device
 
-    def predict_masks(self, image_paths: list[Path]) -> list[np.ndarray]:
+    def predict_masks_on_preprocessed(self, preprocessed_rgbs: list[np.ndarray]) -> list[np.ndarray]:
         """
-        Predict static boolean masks for a list of images.
-        Returns: list of boolean ndarray with shape [H, W], True = Static, False = Dynamic (filtered).
+        preprocessed_rgbs: list of uint8 ndarray [H, W, 3] (RGB, exactly matching ABot-Recon input)
+        Returns: list of boolean ndarray [H, W], True = Static, False = Dynamic (filtered)
         """
-        static_masks = []
-        for idx, path in enumerate(image_paths):
-            img = cv2.imread(str(path))
-            h, w = img.shape[:2]
+        raw_dyn_masks = []
+        for rgb in preprocessed_rgbs:
+            h, w = rgb.shape[:2]
             results = self.model.predict(
-                str(path),
+                rgb,
                 classes=self.dynamic_classes,
                 conf=self.conf_thresh,
                 device=self.device,
@@ -66,16 +68,29 @@ class DynamicMaskGenerator:
                     if m.shape != (h, w):
                         m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
                     dyn_mask = np.bitwise_or(dyn_mask, m)
+            raw_dyn_masks.append(dyn_mask)
 
-            if self.dilate_kernel > 0 and np.any(dyn_mask):
+        # Temporal smoothing: if frame i-1 and i+1 have dynamic mask, propagate to frame i
+        smoothed_dyn_masks = []
+        n_frames = len(raw_dyn_masks)
+        for i in range(n_frames):
+            cur_mask = raw_dyn_masks[i].copy()
+            if np.sum(cur_mask) == 0 and 0 < i < n_frames - 1:
+                prev_mask = raw_dyn_masks[i - 1]
+                next_mask = raw_dyn_masks[i + 1]
+                if np.sum(prev_mask) > 0 and np.sum(next_mask) > 0:
+                    cur_mask = np.bitwise_or(prev_mask, next_mask)
+
+            # Morphological dilation to thoroughly eliminate edge bleeding/hairs
+            if self.dilate_kernel > 0 and np.any(cur_mask):
                 kernel = cv2.getStructuringElement(
                     cv2.MORPH_ELLIPSE, (self.dilate_kernel, self.dilate_kernel)
                 )
-                dyn_mask = cv2.dilate(dyn_mask, kernel)
+                cur_mask = cv2.dilate(cur_mask, kernel)
 
-            static_mask = (dyn_mask == 0)
-            static_masks.append(static_mask)
-        return static_masks
+            smoothed_dyn_masks.append(cur_mask == 0)
+
+        return smoothed_dyn_masks
 
 
 def export_colored_pointcloud(
@@ -85,12 +100,7 @@ def export_colored_pointcloud(
     output_ply: Path,
     point_stride: int = 2,
 ) -> int:
-    """
-    Subsamples and exports valid 3D points + RGB colors to a binary PLY file.
-    world_points: [N, H, W, 3]
-    colors: [N, H, W, 3] (uint8)
-    mask: [N, H, W] (bool, True = valid)
-    """
+    """Subsamples and exports valid 3D points + RGB colors to a binary PLY file."""
     pts = world_points[:, ::point_stride, ::point_stride, :].reshape(-1, 3)
     cls = colors[:, ::point_stride, ::point_stride, :].reshape(-1, 3)
 
@@ -101,10 +111,12 @@ def export_colored_pointcloud(
 
     pts_valid = pts[valid].cpu().numpy().astype(np.float32)
     cls_valid = cls[valid].cpu().numpy().astype(np.uint8)
+
     empty_edges = np.empty((0, 2), dtype=np.int32)
     empty_edge_colors = np.empty((0, 3), dtype=np.uint8)
     write_binary_ply(output_ply, pts_valid, cls_valid, empty_edges, empty_edge_colors)
     return len(pts_valid)
+
 
 def main():
     parser = argparse.ArgumentParser(description="ABot-Recon with Dynamic Mask Filtering")
@@ -129,7 +141,9 @@ def main():
     parser.add_argument("--point-stride", type=int, default=2)
     parser.add_argument("--confidence-threshold", type=float, default=0.2)
     parser.add_argument("--loop-closure", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--yolo-model", default="yolo11n-seg.pt")
+    parser.add_argument("--yolo-model", default="yolo11m-seg.pt")
+    parser.add_argument("--conf-thresh", type=float, default=0.15)
+    parser.add_argument("--dilate-kernel", type=int, default=11)
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,18 +156,37 @@ def main():
 
     print(f"[1/4] Found {len(images)} images in {args.image_dir}")
 
-    # 1. Compute 2D dynamic masks
-    print("[2/4] Generating 2D dynamic masks with YOLO-seg...")
-    mask_gen = DynamicMaskGenerator(
+    # 1. Preprocess images exactly as ABot-Recon does
+    print("[2/4] Preprocessing frames & generating aligned 2D dynamic masks with YOLO-seg...")
+    preprocessed_tensors = []
+    preprocessed_rgbs = []
+    for img_path in images:
+        with Image.open(img_path) as img:
+            tensor, _ = preprocess_image(img, height=280, width=504)
+        preprocessed_tensors.append(tensor)
+        rgb_uint8 = (tensor.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8).numpy()
+        preprocessed_rgbs.append(rgb_uint8)
+
+    mask_gen = AlignedDynamicMaskGenerator(
         model_name=args.yolo_model,
-        conf_thresh=0.25,
-        dilate_kernel=7,
+        conf_thresh=args.conf_thresh,
+        dilate_kernel=args.dilate_kernel,
         device=args.device,
     )
     t0 = time.time()
-    static_masks_np = mask_gen.predict_masks(images)
+    static_masks_np = mask_gen.predict_masks_on_preprocessed(preprocessed_rgbs)
     mask_time = time.time() - t0
-    print(f"Mask generation finished in {mask_time:.2f}s ({len(images)/mask_time:.1f} FPS)")
+    print(f"Aligned dynamic mask generation finished in {mask_time:.2f}s ({len(images)/mask_time:.1f} FPS)")
+
+    # Save visual debug samples
+    vis_dir = args.output_dir / "aligned_masks_vis"
+    vis_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(0, len(images), 5):
+        rgb_vis = preprocessed_rgbs[idx].copy()
+        dyn_pixels = ~static_masks_np[idx]
+        rgb_vis[dyn_pixels] = [255, 0, 0]  # Mark dynamic as red
+        out_vis = cv2.addWeighted(preprocessed_rgbs[idx], 0.5, rgb_vis, 0.5, 0)
+        cv2.imwrite(str(vis_dir / f"aligned_vis_{images[idx].name}"), cv2.cvtColor(out_vis, cv2.COLOR_RGB2BGR))
 
     # 2. Run ABot-Recon Reconstruction
     print("[3/4] Running ABot-Recon 3D reconstruction...")
@@ -180,33 +213,19 @@ def main():
     recon_time = time.time() - t1
     print(f"ABot-Recon finished in {recon_time:.2f}s ({len(images)/recon_time:.1f} FPS)")
 
-    # 3. Extract RGB colors
-    colors_list = []
-    for img_path in images:
-        with Image.open(img_path) as img:
-            tensor, _ = preprocess_image(img)
-        colors_list.append((tensor.clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0))
-    colors = torch.stack(colors_list)  # [N, H, W, 3]
-
-    # Pre-processed shape matching
-    H, W = result.local_points.shape[1], result.local_points.shape[2]
-    resized_static_masks = []
-    for m in static_masks_np:
-        if m.shape != (H, W):
-            m_res = cv2.resize(m.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
-        else:
-            m_res = m
-        resized_static_masks.append(torch.from_numpy(m_res))
-    static_masks_tensor = torch.stack(resized_static_masks).to(result.local_points.device)  # [N, H, W]
+    # 3. Stack preprocessed colors & masks with exact spatial matching [N, H, W]
+    colors = torch.stack([torch.from_numpy(rgb) for rgb in preprocessed_rgbs])  # [N, 280, 504, 3]
+    static_masks_tensor = torch.stack([torch.from_numpy(m) for m in static_masks_np]).to(result.local_points.device)  # [N, 280, 504]
 
     world_pts = result.world_points
 
-    # 4. Export Both Baseline (without dynamic filter) and Filtered Pointclouds
-    print("[4/4] Exporting Baseline vs Filtered 3D Point Clouds...")
+    # 4. Export Baseline, Filtered (Static Background), and Removed Dynamic Point Clouds
+    print("[4/4] Exporting Baseline vs Filtered vs Dynamic-Only 3D Point Clouds...")
     baseline_ply = args.output_dir / "reconstruction_baseline_with_dynamic.ply"
     filtered_ply = args.output_dir / "reconstruction_scheme1_filtered.ply"
+    dynamic_only_ply = args.output_dir / "reconstruction_removed_dynamic_only.ply"
 
-    # Baseline mask: only confidence
+    # Baseline mask: only finite & confidence
     baseline_valid_mask = torch.isfinite(world_pts).all(dim=-1)
     if result.confidence_mask is not None:
         baseline_valid_mask = baseline_valid_mask & result.confidence_mask
@@ -215,10 +234,16 @@ def main():
         world_pts, colors, baseline_valid_mask, baseline_ply, point_stride=args.point_stride
     )
 
-    # Filtered mask: confidence & static mask
+    # Filtered mask: baseline & static mask (strictly removes all dynamic entity points)
     filtered_valid_mask = baseline_valid_mask & static_masks_tensor
     filtered_points_count = export_colored_pointcloud(
         world_pts, colors, filtered_valid_mask, filtered_ply, point_stride=args.point_stride
+    )
+
+    # Dynamic only mask: baseline & (~static mask)
+    dynamic_only_mask = baseline_valid_mask & (~static_masks_tensor)
+    dynamic_only_points_count = export_colored_pointcloud(
+        world_pts, colors, dynamic_only_mask, dynamic_only_ply, point_stride=args.point_stride
     )
 
     dynamic_points_removed = baseline_points_count - filtered_points_count
@@ -230,10 +255,12 @@ def main():
         "recon_time_s": round(recon_time, 2),
         "baseline_points": baseline_points_count,
         "filtered_points": filtered_points_count,
+        "dynamic_only_points": dynamic_only_points_count,
         "dynamic_points_removed": dynamic_points_removed,
         "dynamic_removal_ratio_pct": round(reduction_pct, 2),
         "baseline_ply": str(baseline_ply),
         "filtered_ply": str(filtered_ply),
+        "dynamic_only_ply": str(dynamic_only_ply),
     }
 
     with (args.output_dir / "evaluation_report.json").open("w", encoding="utf-8") as f:
@@ -243,10 +270,12 @@ def main():
     print("           Dynamic Object Removal Evaluation           ")
     print("=======================================================")
     print(f"Total Video Frames Processed: {len(images)}")
-    print(f"Baseline Point Cloud (With Dynamic Objects): {baseline_points_count:,} points -> {baseline_ply.name}")
-    print(f"Scheme 1 Point Cloud (Dynamic Filtered):     {filtered_points_count:,} points -> {filtered_ply.name}")
-    print(f"Dynamic Points Removed:                     {dynamic_points_removed:,} points ({reduction_pct:.2f}%)")
-    print(f"Mask Overhead:                              {mask_time/len(images)*1000:.1f} ms/frame")
+    print(f"1. Baseline Point Cloud (With Dynamic Objects): {baseline_points_count:,} points -> {baseline_ply.name}")
+    print(f"2. Scheme 1 Point Cloud (Clean Static Map):     {filtered_points_count:,} points -> {filtered_ply.name}")
+    print(f"3. Isolated Dynamic Points (Removed Person):   {dynamic_only_points_count:,} points -> {dynamic_only_ply.name}")
+    print(f"Dynamic Points Removed:                        {dynamic_points_removed:,} points ({reduction_pct:.2f}%)")
+    print(f"Mask Overhead:                                 {mask_time/len(images)*1000:.1f} ms/frame")
+    print(f"Debug Visuals Saved to:                        {vis_dir}")
     print("=======================================================\n")
 
 
