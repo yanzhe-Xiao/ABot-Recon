@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 import sys
@@ -213,9 +214,20 @@ def main():
     recon_time = time.time() - t1
     print(f"ABot-Recon finished in {recon_time:.2f}s ({len(images)/recon_time:.1f} FPS)")
 
-    # 3. Stack preprocessed colors & masks with exact spatial matching [N, H, W]
+    # 3. Save standard artifacts for multi-view registration and viewer compatibility
+    np.save(args.output_dir / "camera_poses.npy", result.camera_poses.cpu().numpy())
+    np.save(args.output_dir / "relative_poses.npy", result.relative_poses.cpu().numpy())
+    torch.save(result.world_points.cpu(), args.output_dir / "world_points.pt")
+    if result.local_points is not None:
+        torch.save(result.local_points.cpu(), args.output_dir / "local_points.pt")
     colors = torch.stack([torch.from_numpy(rgb) for rgb in preprocessed_rgbs])  # [N, 280, 504, 3]
+    torch.save(colors.cpu(), args.output_dir / "colors.pt")
+    if result.confidence is not None:
+        torch.save(result.confidence.cpu(), args.output_dir / "confidence.pt")
     static_masks_tensor = torch.stack([torch.from_numpy(m) for m in static_masks_np]).to(result.local_points.device)  # [N, 280, 504]
+    torch.save(static_masks_tensor.cpu(), args.output_dir / "static_masks.pt")
+    with (args.output_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(result.metadata, handle, indent=2)
 
     world_pts = result.world_points
 
@@ -246,6 +258,9 @@ def main():
         world_pts, colors, dynamic_only_mask, dynamic_only_ply, point_stride=args.point_stride
     )
 
+    # Also save standard reconstruction.ply as filtered_ply
+    shutil.copyfile(filtered_ply, args.output_dir / "reconstruction.ply")
+
     dynamic_points_removed = baseline_points_count - filtered_points_count
     reduction_pct = (dynamic_points_removed / max(1, baseline_points_count)) * 100.0
 
@@ -261,6 +276,7 @@ def main():
         "baseline_ply": str(baseline_ply),
         "filtered_ply": str(filtered_ply),
         "dynamic_only_ply": str(dynamic_only_ply),
+        "reconstruction_ply": str(args.output_dir / "reconstruction.ply"),
     }
 
     with (args.output_dir / "evaluation_report.json").open("w", encoding="utf-8") as f:
