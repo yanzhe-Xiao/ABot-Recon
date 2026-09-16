@@ -67,209 +67,6 @@ def encode_frame_jpeg_base64(colors_tensor: torch.Tensor, frame_idx: int, qualit
         return None
 
 
-# Curated models registry for rich metadata preservation
-CURATED_MODELS_REGISTRY: Dict[str, Dict[str, str]] = {
-    "outputs/alignment/general_fusion/fused_3_streams_normal_merged.ply": {
-        "name": "🌟 [三段视频融合 推荐] 视频1+2+3 Sim(3) PGO真彩融合 (28.3万点, 15mm去重+SOR, 推荐)",
-        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
-        "description": "基于 ALIKED+LightGlue+Sim(3) PGO+多尺度VGICP 对视频1-3三路流式融合 (282,569 点，7.3MB)",
-    },
-    "outputs/alignment/general_fusion/fused_3_streams_colored_merged.ply": {
-        "name": "🎨 [三段视频融合 双色检验] 视频1(红)+视频2(绿)+视频3(蓝) 多色标定 (推荐)",
-        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
-        "description": "三色标定（1红/2绿/3蓝），直观检验三路点云空间100%重叠吻合度 (282,569 点，7.3MB)",
-    },
-    "outputs/alignment/general_fusion/fused_3_streams_normal_full.ply": {
-        "name": "🔥 [三段视频融合 全量无损] 视频1+2+3 全量高清拼接 (1199万点, 零损失)",
-        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
-        "description": "保留全部 11,992,469 点，无损拼接完整全景走廊与开阔大厅 (308.8MB)",
-    },
-    "outputs/alignment/general_fusion/fused_3_streams_colored_full.ply": {
-        "name": "🎨 [三段视频融合 全量三色] 视频1+2+3 全量高清三色区分 (1199万点)",
-        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
-        "description": "1199万点全量三色点云（1红/2绿/3蓝） (308.8MB)",
-    },
-    "outputs/16_1/reconstruction.ply": {
-        "name": "📹 视频 1 - 3D点云重建 (410万点, 动态物体已滤除)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "data/16/1.mp4 抽帧 fps=6, 410万点",
-    },
-    "outputs/16_2/reconstruction.ply": {
-        "name": "📹 视频 2 - 3D点云重建 (440万点, 动态物体已滤除)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "data/16/2.mp4 抽帧 fps=6, 440万点",
-    },
-    "outputs/16_3/reconstruction.ply": {
-        "name": "📹 视频 3 - 3D点云重建 (348万点, 动态物体已滤除)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "data/16/3.mp4 抽帧 fps=6, 348万点",
-    },
-    "outputs/16_1/reconstruction_clean.ply": {
-        "name": "🧹 视频 1 - 滤波去噪轻量点云 (9.8万点, 流畅交互)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "outputs/16_1/reconstruction_clean.ply",
-    },
-    "outputs/16_2/reconstruction_clean.ply": {
-        "name": "🧹 视频 2 - 滤波去噪轻量点云 (12.4万点, 流畅交互)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "outputs/16_2/reconstruction_clean.ply",
-    },
-    "outputs/16_3/reconstruction_clean.ply": {
-        "name": "🧹 视频 3 - 滤波去噪轻量点云 (9.3万点, 流畅交互)",
-        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
-        "description": "outputs/16_3/reconstruction_clean.ply",
-    },
-    "outputs/alignment/perfect_corridor_merged.ply": {
-        "name": "🏆 [走廊直道对齐 最佳] 测试走廊 视频1+视频2 统一轴线融合 (23.3万点, 15mm真彩, 推荐)",
-        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
-        "description": "消除两端反向录制坐标系偏航角差异，93.9%重叠率精确对齐同一个书架与显示器 (233,115 点，6.0MB)",
-    },
-    "outputs/alignment/perfect_corridor_colored_merged.ply": {
-        "name": "🎨 [走廊直道对齐 双色检验] 视频1(红) + 视频2(绿) 统一轴线标定 (推荐)",
-        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
-        "description": "视频1红色、视频2绿色高对比标定，直观检验书架、地面与显示器空间 100% 重叠吻合",
-    },
-    "outputs/alignment/data_05_08_method2_merged.ply": {
-        "name": "🔥 [方案二 多模态] 视频流05-08 正常真彩融合 (341万点, 1.5cm体素去重, 推荐)",
-        "category": "Method 2 Multimodal 05-08",
-        "description": "基于 ALIKED+LightGlue+Umeyama+small_gicp 对视频05-08多视角流式融合 (3,409,327 点，87.8MB)",
-    },
-    "outputs/alignment/data_05_08_method2_colored_merged.ply": {
-        "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分融合 (341万点, 红/绿/蓝/金, 推荐)",
-        "category": "Method 2 Colored 05-08",
-        "description": "每个视频流赋予独立高对比颜色（05红/06绿/07蓝/08金），直观清晰展现各视频点云空间分布",
-    },
-    "outputs/alignment/data_05_08_method2_full_merged.ply": {
-        "name": "🌟 [方案二 多模态] 视频流05-08 正常真彩全量融合 (1401万点超高清点云, 零损失)",
-        "category": "Method 2 Multimodal 05-08",
-        "description": "保留05-08全部 14,014,980 点，无损拼接完整全景走廊与开阔大厅 (361MB)",
-    },
-    "outputs/alignment/data_05_08_method2_colored_full_merged.ply": {
-        "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分全量融合 (1401万点超高清点云)",
-        "category": "Method 2 Colored 05-08",
-        "description": "1401万点全量四色点云（05红/06绿/07蓝/08金）",
-    },
-    "outputs/data_05_loop/reconstruction.ply": {
-        "name": "📹 视频流 05 - 点云重建 (567万点, A-B-C-B-A 循环全景)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/05 走廊循环视频流 (643 帧)，567万点超高清点云",
-    },
-    "outputs/data_06_loop/reconstruction.ply": {
-        "name": "📹 视频流 06 - 点云重建 (271万点, C-D 右侧视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/06 视频流 (307 帧)，271万点点云",
-    },
-    "outputs/data_07_loop/reconstruction.ply": {
-        "name": "📹 视频流 07 - 点云重建 (344万点, B-D 主干基准视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/07 视频流 (390 帧)，344万点点云 (多视角基准锚点)",
-    },
-    "outputs/data_08_loop/reconstruction.ply": {
-        "name": "📹 视频流 08 - 点云重建 (220万点, C-D 左侧视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/08 视频流 (249 帧)，220万点点云",
-    },
-    "outputs/alignment/method2_lightglue_umeyama_full_merged.ply": {
-        "name": "🔥 [方案二 多模态] 走廊实测 视频1+视频2 全量无损拼接 (LightGlue+Umeyama, 539万点, 推荐)",
-        "category": "Method 2 Multimodal",
-        "description": "基于 ALIKED+LightGlue 视频特征匹配与 Umeyama 求解相似变换融合 (5,389,020 点，78.87% @ 5cm)",
-    },
-    "outputs/alignment/method2_lightglue_umeyama_merged.ply": {
-        "name": "🌟 [方案二 多模态] 走廊实测 视频1+视频2 1.5cm去重融合 (49.3万点)",
-        "category": "Method 2 Multimodal",
-        "description": "1.5cm 体素去重精简版本，适合低配显卡极致流畅交互 (493,129 点，13MB)",
-    },
-    "outputs/alignment/method1_kiss_gicp_full_merged.ply": {
-        "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 全量无损拼接 (KISS-Matcher+GICP, 539万点)",
-        "category": "Method 1 Geometric",
-        "description": "纯 3D 几何特征 Faster-PFH + small_gicp 并行对齐无损拼接 (5,389,020 点，75.85% @ 5cm)",
-    },
-    "outputs/alignment/method1_kiss_gicp_merged.ply": {
-        "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 1.5cm去重融合 (46.4万点)",
-        "category": "Method 1 Geometric",
-        "description": "1.5cm 体素去重平滑过渡版本 (463,701 点，12MB)",
-    },
-    "outputs/alignment/merged.ply": {
-        "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 R3PM-Net全量融合 (merged.ply, 539万点)",
-        "category": "R3PM-Net Merged",
-        "description": "基于 R3PM-Net 深度点匹配网络与 Sinkhorn 对应估计对齐 (5,389,020 点，80.8MB)",
-    },
-    "outputs/alignment/mine_r3pm_net_5mm_merged.ply": {
-        "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 5mm去重融合 (276万点)",
-        "category": "R3PM-Net Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,759,565 点，39.5MB)",
-    },
-    "outputs/mine_VID20260903181931_loop/reconstruction.ply": {
-        "name": "📹 自定义视频 1 - 回环优化 (VID181931, 279万点, 走廊实测)",
-        "category": "My Videos",
-        "description": "data/mine 走廊实测视频流 (316 帧)，279万点超高清点云",
-    },
-    "outputs/mine_VID20260903181931_noloop/reconstruction.ply": {
-        "name": "📹 自定义视频 1 - 原始流式 (VID181931, 279万点)",
-        "category": "My Videos",
-        "description": "data/mine 走廊视频 1，纯因果流式预测",
-    },
-    "outputs/mine_VID20260903182041_loop/reconstruction.ply": {
-        "name": "📹 自定义视频 2 - 回环优化 (VID182041, 260万点, 走廊实测)",
-        "category": "My Videos",
-        "description": "data/mine 走廊实测视频流 (295 帧)，260万点超高清点云",
-    },
-    "outputs/mine_VID20260903182041_noloop/reconstruction.ply": {
-        "name": "📹 自定义视频 2 - 原始流式 (VID182041, 260万点)",
-        "category": "My Videos",
-        "description": "data/mine 走廊视频 2，纯因果流式预测",
-    },
-    "outputs/alignment/tum_method2_lightglue_umeyama_full_merged.ply": {
-        "name": "🔥 [TUM 方案二] 360+Desk 100%全量无损拼接 (604万超高清点云, 推荐)",
-        "category": "TUM Merged",
-        "description": "保留全部 333万+270万 原始点云，零点数损失 (6,041,700 点，86MB)",
-    },
-    "outputs/alignment/tum_method1_kiss_gicp_full_merged.ply": {
-        "name": "🔥 [TUM 方案一] 360+Desk 100%全量无损拼接 (604万超高清点云)",
-        "category": "TUM Merged",
-        "description": "纯几何配准全量拼接，零点数损失 (6,041,700 点，86MB)",
-    },
-    "outputs/alignment/tum_method2_lightglue_umeyama_merged.ply": {
-        "name": "🌟 [TUM 方案二] 360+Desk 5mm去重融合 (LightGlue+Umeyama, 222万点)",
-        "category": "TUM Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,217,810 点，31MB)",
-    },
-    "outputs/alignment/tum_method1_kiss_gicp_merged.ply": {
-        "name": "📐 [TUM 方案一] 360+Desk 5mm去重融合 (KISS-Matcher+GICP, 226万点)",
-        "category": "TUM Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,261,226 点，32MB)",
-    },
-    "outputs/tum_360_loop/reconstruction.ply": {
-        "name": "🔄 TUM 360环绕 - 回环优化 (Loop Closure, 333万点)",
-        "category": "TUM 360",
-        "description": "360度大环绕轨迹对齐，消除闭环双层重影",
-    },
-    "outputs/tum_360_noloop/reconstruction.ply": {
-        "name": "🔄 TUM 360环绕 - 原始流式 (No Loop, 333万点)",
-        "category": "TUM 360",
-        "description": "纯因果单向累加，观察长程旋转下的轨迹与几何漂移",
-    },
-    "outputs/tum_desk_loop/reconstruction.ply": {
-        "name": "🖥️ TUM 办公桌面 - 回环优化 (Loop Closure, 270万点)",
-        "category": "TUM Desk",
-        "description": "电脑显示器/书籍/键盘，回环位姿图平滑对齐",
-    },
-    "outputs/tum_desk_noloop/reconstruction.ply": {
-        "name": "🖥️ TUM 办公桌面 - 原始流式 (No Loop, 270万点)",
-        "category": "TUM Desk",
-        "description": "纯因果单向流式累加",
-    },
-    "outputs/demo_loop/reconstruction.ply": {
-        "name": "🎬 快速演示序列 - 回环优化 (52.9万点)",
-        "category": "Demo",
-        "description": "60 帧快速测试序列",
-    },
-    "outputs/demo_noloop/reconstruction.ply": {
-        "name": "🚀 快速演示序列 - 原始流式 (52.9万点)",
-        "category": "Demo",
-        "description": "60 帧快速测试序列",
-    },
-}
 
 def get_ply_header_info(path: Path) -> Tuple[Optional[int], float]:
     """Quickly read PLY header to extract vertex count and file size in MB."""
@@ -653,93 +450,26 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                         })
         sequences = dynamic_frames + sequences
 
-        # 3. Static raw dataset sequences
-        video_registry = [
-            {
-                "id": "data/data/05",
-                "name": "📹 视频流 05 (A-B-C-B-A 循环全景)",
-                "path": "data/data/05",
-                "description": "A狭窄走廊出发走至B右转90°到C，绕书柜转180°回B左转直走回A (643 帧)",
-            },
-            {
-                "id": "data/data/06",
-                "name": "📹 视频流 06 (C-D 右侧视角)",
-                "path": "data/data/06",
-                "description": "从目标区域右侧走过 (镜头朝左) C点到D点 (307 帧)",
-            },
-            {
-                "id": "data/data/07",
-                "name": "📹 视频流 07 (B-D 主干基准视角)",
-                "path": "data/data/07",
-                "description": "与06同路线，摄像头运动基本相同，B点到D点全程 (390 帧)",
-            },
-            {
-                "id": "data/data/08",
-                "name": "📹 视频流 08 (C-D 左侧视角)",
-                "path": "data/data/08",
-                "description": "与06同区域，但从左侧走过 (镜头朝右) C点到D点 (249 帧)",
-            },
-            {
-                "id": "data/mine/VID20260903181931",
-                "name": "📹 用户实拍视频 1 (走廊流式 VID181931)",
-                "path": "data/mine/VID20260903181931",
-                "description": "data/mine 实拍走廊视频 (316 帧)",
-            },
-            {
-                "id": "data/mine/VID20260903182041",
-                "name": "📹 用户实拍视频 2 (走廊流式 VID182041)",
-                "path": "data/mine/VID20260903182041",
-                "description": "data/mine 实拍走廊视频 (295 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
-                "name": "🖥️ TUM 办公桌面全景 (Desk Sequence)",
-                "path": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
-                "description": "办公桌全景、电脑显示器、键盘、书籍 (613 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
-                "name": "📐 TUM 空间平移序列 (XYZ Motion)",
-                "path": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
-                "description": "沿 X/Y/Z 三轴典型平移扫描 (798 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_360/rgb",
-                "name": "🔄 TUM 360度环绕回环 (360 Loop)",
-                "path": "data/tum/rgbd_dataset_freiburg1_360/rgb",
-                "description": "绕桌面 360 度环绕拍摄，经典回环场景 (756 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_room/rgb",
-                "name": "🏢 TUM 完整大房间场景 (Full Room)",
-                "path": "data/tum/rgbd_dataset_freiburg1_room/rgb",
-                "description": "完整办公室大场景、多张桌椅、黑板 (1362 帧)",
-            },
-            {
-                "id": "examples/images",
-                "name": "🎬 快速演示序列 (Demo Sample)",
-                "path": "examples/images",
-                "description": "TUM 办公桌局部平移 (60 帧快速体验)",
-            },
-        ]
-
-        for item in video_registry:
-            seq_dir = ROOT_DIR / item["path"]
-            if seq_dir.is_dir():
-                frames = len([
-                    p for p in seq_dir.iterdir()
-                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
-                ])
-                if frames > 0:
-                    sequences.append({
-                        "id": item["id"],
-                        "name": f"{item['name']} - {frames} 帧",
-                        "path": item["path"],
-                        "category": "📹 原始视频流序列 (GPU 深度在线推理建图)",
-                        "type": "video",
-                        "frames": frames,
-                        "description": item["description"],
-                    })
+        # 3. Dynamically scan data/ and examples/ for any raw image sequence folders
+        scan_dirs = [ROOT_DIR / "data", ROOT_DIR / "examples"]
+        for base_dir in scan_dirs:
+            if not base_dir.is_dir():
+                continue
+            for d in sorted(base_dir.glob("**"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if d.is_dir() and "frames" not in d.parts:
+                    imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}]
+                    if len(imgs) >= 10:
+                        rel_path = str(d.relative_to(ROOT_DIR))
+                        if not any(s.get("path") == rel_path for s in sequences):
+                            sequences.append({
+                                "id": rel_path,
+                                "name": f"📹 原始图像序列 [{d.parent.name}/{d.name}] ({len(imgs)} 帧)",
+                                "path": rel_path,
+                                "category": "📹 原始图像序列 (GPU 在线推理建图)",
+                                "type": "video",
+                                "frames": len(imgs),
+                                "description": f"图像序列: {rel_path} ({len(imgs)} 帧)",
+                            })
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

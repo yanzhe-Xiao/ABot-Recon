@@ -407,20 +407,7 @@
       <div class="control-group">
         <label style="font-size:12px; color:var(--text-muted);">📹 选择建图数据源 (outputs 点云或视频流)</label>
         <select id="stream-sequence-select">
-          <option value="outputs/16_1/frames" selected>📹 视频 1 (data/16/1.mp4 抽帧 - 157 帧)</option>
-          <option value="outputs/16_2/frames">📹 视频 2 (data/16/2.mp4 抽帧 - 155 帧)</option>
-          <option value="outputs/16_3/frames">📹 视频 3 (data/16/3.mp4 抽帧 - 150 帧)</option>
-          <option value="data/data/05" selected>📹 视频流 05 (A-B-C-B-A 循环全景 - 643 帧)</option>
-          <option value="data/data/06">📹 视频流 06 (C-D 右侧视角 - 307 帧)</option>
-          <option value="data/data/07">📹 视频流 07 (B-D 主干基准视角 - 390 帧)</option>
-          <option value="data/data/08">📹 视频流 08 (C-D 左侧视角 - 249 帧)</option>
-          <option value="data/mine/VID20260903181931">📹 用户实拍视频 1 (走廊流式 VID181931 - 316 帧)</option>
-          <option value="data/mine/VID20260903182041">📹 用户实拍视频 2 (走廊流式 VID182041 - 295 帧)</option>
-          <option value="data/tum/rgbd_dataset_freiburg1_desk/rgb">🖥️ TUM 办公桌面全景 (Desk - 613 帧)</option>
-          <option value="data/tum/rgbd_dataset_freiburg1_xyz/rgb">📐 TUM 空间平移序列 (XYZ - 798 帧)</option>
-          <option value="data/tum/rgbd_dataset_freiburg1_360/rgb">🔄 TUM 360度环绕回环 (360 Loop - 756 帧)</option>
-          <option value="data/tum/rgbd_dataset_freiburg1_room/rgb">🏢 TUM 完整大房间场景 (Room - 1362 帧)</option>
-          <option value="examples/images">🎬 快速演示序列 (Demo Sample - 60 帧)</option>
+          <option value="" disabled selected>正在扫描可用视频流与点云数据源...</option>
         </select>
       </div>
 
@@ -1502,41 +1489,104 @@
         })
         .catch(err => console.warn("Failed to load sequences list:", err));
 
-      fetch('/api/offline_models')
-        .then(r => r.json())
-        .then(models => {
-          if (models && models.length > 0) {
-            const sel = document.getElementById('model-select');
-            sel.innerHTML = '';
-            const groups = {};
-            models.forEach(m => {
-              const cat = m.category || '全部点云模型';
-              if (!groups[cat]) {
-                const grp = document.createElement('optgroup');
-                grp.label = cat;
-                groups[cat] = grp;
-                sel.appendChild(grp);
+      function showToast(msg) {
+        let toast = document.getElementById('viewer-toast');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'viewer-toast';
+          toast.style.cssText = 'position:fixed; bottom:24px; right:24px; background:rgba(30,41,59,0.92); color:#e2e8f0; padding:10px 18px; border-radius:8px; font-size:13px; border:1px solid rgba(59,130,246,0.5); box-shadow:0 8px 24px rgba(0,0,0,0.4); z-index:9999; pointer-events:none; transition:opacity 0.3s ease;';
+          document.body.appendChild(toast);
+        }
+        toast.innerText = msg;
+        toast.style.opacity = '1';
+        clearTimeout(toast._timer);
+        toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 3500);
+      }
+
+      function populateModelSelect(models, isInitialLoad) {
+        if (!models || models.length === 0) return;
+        const sel = document.getElementById('model-select');
+        const currentSelectedVal = sel.value;
+        sel.innerHTML = '';
+        const groups = {};
+        models.forEach(m => {
+          const cat = m.category || '全部点云模型';
+          if (!groups[cat]) {
+            const grp = document.createElement('optgroup');
+            grp.label = cat;
+            groups[cat] = grp;
+            sel.appendChild(grp);
+          }
+          const opt = document.createElement('option');
+          opt.value = m.url;
+          opt.innerText = m.name;
+          groups[cat].appendChild(opt);
+        });
+
+        if (sel.options.length > 0) {
+          let foundCurrent = false;
+          if (currentSelectedVal && !isInitialLoad) {
+            for (let opt of sel.options) {
+              if (opt.value === currentSelectedVal) {
+                opt.selected = true;
+                foundCurrent = true;
+                break;
               }
-              const opt = document.createElement('option');
-              opt.value = m.url;
-              opt.innerText = m.name;
-              groups[cat].appendChild(opt);
-            });
-            if (sel.options.length > 0) {
-              let defaultOpt = sel.options[0];
-              for (let opt of sel.options) {
-                if (opt.value.includes('fused_3_streams_normal_merged.ply')) {
-                  defaultOpt = opt;
-                  break;
-                }
-              }
-              sel.value = defaultOpt.value;
+            }
+          }
+          if (!foundCurrent) {
+            let defaultOpt = sel.options[0];
+            defaultOpt.selected = true;
+            sel.value = defaultOpt.value;
+            if (isInitialLoad) {
               loadPLYFromUrl(defaultOpt.value);
             }
           }
-        })
-        .catch(err => console.warn("Failed to load offline models list:", err));
-    }
+        }
+      }
+
+      async function refreshOfflineModels(isUserClick = false) {
+        try {
+          const resp = await fetch('/api/offline_models?t=' + Date.now());
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const models = await resp.json();
+          populateModelSelect(models, isUserClick);
+          if (isUserClick) {
+            showToast(`🔄 已动态扫描 outputs/ 目录 (共 ${models.length} 个点云模型)`);
+          }
+        } catch (err) {
+          console.warn("Failed to load offline models:", err);
+          if (isUserClick) {
+            showToast("❌ 刷新失败，请检查服务连接");
+          }
+        }
+      }
+
+      // Initial load
+      refreshOfflineModels(true);
+
+      // Wire refresh button
+      const btnRefresh = document.getElementById('btn-refresh-models');
+      if (btnRefresh) {
+        btnRefresh.addEventListener('click', () => refreshOfflineModels(true));
+      }
+
+      // Background auto-polling every 4 seconds
+      let lastModelsSig = "";
+      setInterval(async () => {
+        try {
+          const resp = await fetch('/api/offline_models?t=' + Date.now());
+          if (!resp.ok) return;
+          const models = await resp.json();
+          const sig = models.map(m => m.path + ':' + m.size_bytes).join('|');
+          if (lastModelsSig && sig !== lastModelsSig) {
+            console.log("Detected outputs directory changes, refreshing...");
+            populateModelSelect(models, false);
+            showToast(`✨ 检测到 outputs 目录新增/更新点云，已自动同步！(共 ${models.length} 个模型)`);
+          }
+          lastModelsSig = sig;
+        } catch (e) {}
+      }, 4000);
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', startApp);
