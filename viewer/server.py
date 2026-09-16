@@ -69,6 +69,56 @@ def encode_frame_jpeg_base64(colors_tensor: torch.Tensor, frame_idx: int, qualit
 
 # Curated models registry for rich metadata preservation
 CURATED_MODELS_REGISTRY: Dict[str, Dict[str, str]] = {
+    "outputs/alignment/general_fusion/fused_3_streams_normal_merged.ply": {
+        "name": "🌟 [三段视频融合 推荐] 视频1+2+3 Sim(3) PGO真彩融合 (28.3万点, 15mm去重+SOR, 推荐)",
+        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
+        "description": "基于 ALIKED+LightGlue+Sim(3) PGO+多尺度VGICP 对视频1-3三路流式融合 (282,569 点，7.3MB)",
+    },
+    "outputs/alignment/general_fusion/fused_3_streams_colored_merged.ply": {
+        "name": "🎨 [三段视频融合 双色检验] 视频1(红)+视频2(绿)+视频3(蓝) 多色标定 (推荐)",
+        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
+        "description": "三色标定（1红/2绿/3蓝），直观检验三路点云空间100%重叠吻合度 (282,569 点，7.3MB)",
+    },
+    "outputs/alignment/general_fusion/fused_3_streams_normal_full.ply": {
+        "name": "🔥 [三段视频融合 全量无损] 视频1+2+3 全量高清拼接 (1199万点, 零损失)",
+        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
+        "description": "保留全部 11,992,469 点，无损拼接完整全景走廊与开阔大厅 (308.8MB)",
+    },
+    "outputs/alignment/general_fusion/fused_3_streams_colored_full.ply": {
+        "name": "🎨 [三段视频融合 全量三色] 视频1+2+3 全量高清三色区分 (1199万点)",
+        "category": "走廊三段视频融合 (Video 1-3 Fusion)",
+        "description": "1199万点全量三色点云（1红/2绿/3蓝） (308.8MB)",
+    },
+    "outputs/16_1/reconstruction.ply": {
+        "name": "📹 视频 1 - 3D点云重建 (410万点, 动态物体已滤除)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "data/16/1.mp4 抽帧 fps=6, 410万点",
+    },
+    "outputs/16_2/reconstruction.ply": {
+        "name": "📹 视频 2 - 3D点云重建 (440万点, 动态物体已滤除)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "data/16/2.mp4 抽帧 fps=6, 440万点",
+    },
+    "outputs/16_3/reconstruction.ply": {
+        "name": "📹 视频 3 - 3D点云重建 (348万点, 动态物体已滤除)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "data/16/3.mp4 抽帧 fps=6, 348万点",
+    },
+    "outputs/16_1/reconstruction_clean.ply": {
+        "name": "🧹 视频 1 - 滤波去噪轻量点云 (9.8万点, 流畅交互)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "outputs/16_1/reconstruction_clean.ply",
+    },
+    "outputs/16_2/reconstruction_clean.ply": {
+        "name": "🧹 视频 2 - 滤波去噪轻量点云 (12.4万点, 流畅交互)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "outputs/16_2/reconstruction_clean.ply",
+    },
+    "outputs/16_3/reconstruction_clean.ply": {
+        "name": "🧹 视频 3 - 滤波去噪轻量点云 (9.3万点, 流畅交互)",
+        "category": "视频 1-3 独立点云 (Video 1-3 Individual)",
+        "description": "outputs/16_3/reconstruction_clean.ply",
+    },
     "outputs/alignment/perfect_corridor_merged.ply": {
         "name": "🏆 [走廊直道对齐 最佳] 测试走廊 视频1+视频2 统一轴线融合 (23.3万点, 15mm真彩, 推荐)",
         "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
@@ -256,6 +306,8 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
     models = []
 
     category_order = {
+        "走廊三段视频融合 (Video 1-3 Fusion)": -10,
+        "视频 1-3 独立点云 (Video 1-3 Individual)": -9,
         "走廊精准直道融合 (Perfect Corridor Fusion)": -2,
         "Method 2 Multimodal 05-08": 0,
         "Method 2 Colored 05-08": 1,
@@ -370,7 +422,9 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
     def get_sort_key(m):
         prio = 1
         fname = Path(m["path"]).name
-        if fname in ("data_05_08_method2_merged.ply", "data_05_08_method2_colored_merged.ply", "reconstruction.ply"):
+        if "fused_3_streams_normal_merged.ply" in m["path"]:
+            prio = -10
+        elif fname in ("data_05_08_method2_merged.ply", "data_05_08_method2_colored_merged.ply", "reconstruction.ply"):
             prio = 0
         return (m["_order"], prio, m["name"])
 
@@ -612,6 +666,24 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
 
         # 2. Raw video sequences
         video_registry = [
+            {
+                "id": "outputs/16_1/frames",
+                "name": "📹 视频 1 (data/16/1.mp4 - 157 帧)",
+                "path": "outputs/16_1/frames",
+                "description": "data/16/1.mp4 抽帧 fps=6, 157 帧",
+            },
+            {
+                "id": "outputs/16_2/frames",
+                "name": "📹 视频 2 (data/16/2.mp4 - 155 帧)",
+                "path": "outputs/16_2/frames",
+                "description": "data/16/2.mp4 抽帧 fps=6, 155 帧",
+            },
+            {
+                "id": "outputs/16_3/frames",
+                "name": "📹 视频 3 (data/16/3.mp4 - 150 帧)",
+                "path": "outputs/16_3/frames",
+                "description": "data/16/3.mp4 抽帧 fps=6, 150 帧",
+            },
             {
                 "id": "data/data/05",
                 "name": "📹 视频流 05 (A-B-C-B-A 循环全景)",

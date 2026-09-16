@@ -407,6 +407,9 @@
       <div class="control-group">
         <label style="font-size:12px; color:var(--text-muted);">📹 选择建图数据源 (outputs 点云或视频流)</label>
         <select id="stream-sequence-select">
+          <option value="outputs/16_1/frames" selected>📹 视频 1 (data/16/1.mp4 抽帧 - 157 帧)</option>
+          <option value="outputs/16_2/frames">📹 视频 2 (data/16/2.mp4 抽帧 - 155 帧)</option>
+          <option value="outputs/16_3/frames">📹 视频 3 (data/16/3.mp4 抽帧 - 150 帧)</option>
           <option value="data/data/05" selected>📹 视频流 05 (A-B-C-B-A 循环全景 - 643 帧)</option>
           <option value="data/data/06">📹 视频流 06 (C-D 右侧视角 - 307 帧)</option>
           <option value="data/data/07">📹 视频流 07 (B-D 主干基准视角 - 390 帧)</option>
@@ -478,6 +481,12 @@
       <div class="section-title">离线对比数据源</div>
       <div class="control-group">
         <select id="model-select">
+          <option value="/outputs/alignment/general_fusion/fused_3_streams_normal_merged.ply" selected>🌟 [三段视频融合 推荐] 视频1+2+3 Sim(3) PGO真彩融合 (28.3万点, 15mm去重+SOR, 推荐)</option>
+          <option value="/outputs/alignment/general_fusion/fused_3_streams_colored_merged.ply">🎨 [三段视频融合 双色检验] 视频1(红)+视频2(绿)+视频3(蓝) 多色标定 (推荐)</option>
+          <option value="/outputs/alignment/general_fusion/fused_3_streams_normal_full.ply">🔥 [三段视频融合 全量无损] 视频1+2+3 全量高清拼接 (1199万点, 零损失)</option>
+          <option value="/outputs/16_1/reconstruction.ply">📹 视频 1 - 3D点云重建 (410万点, 动态物体已滤除)</option>
+          <option value="/outputs/16_2/reconstruction.ply">📹 视频 2 - 3D点云重建 (440万点, 动态物体已滤除)</option>
+          <option value="/outputs/16_3/reconstruction.ply">📹 视频 3 - 3D点云重建 (348万点, 动态物体已滤除)</option>
           <option value="/outputs/alignment/data_05_08_method2_merged.ply" selected>🔥 [方案二 多模态] 视频流05-08 正常真彩融合 (341万点, 1.5cm体素去重, 推荐)</option>
           <option value="/outputs/alignment/data_05_08_method2_colored_merged.ply">🎨 [方案二 区分色彩] 视频流05-08 四色区分融合 (341万点, 红/绿/蓝/金, 推荐)</option>
           <option value="/outputs/alignment/data_05_08_method2_full_merged.ply">🌟 [方案二 多模态] 视频流05-08 正常真彩全量融合 (1401万点超高清点云, 零损失)</option>
@@ -1546,7 +1555,7 @@
             if (sel.options.length > 0) {
               let defaultOpt = sel.options[0];
               for (let opt of sel.options) {
-                if (opt.value.includes('data_05_08_method2_merged.ply') && !opt.value.includes('colored') && !opt.value.includes('full')) {
+                if (opt.value.includes('fused_3_streams_normal_merged.ply')) {
                   defaultOpt = opt;
                   break;
                 }
