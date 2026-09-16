@@ -417,7 +417,7 @@ def main() -> None:
     parser.add_argument("--point-stride", type=int, default=2, help="Point sampling stride (1=densest, 2=high quality, 4=fast)")
     parser.add_argument("--confidence-threshold", type=float, default=0.2, help="Confidence filter threshold (0.0 to 1.0)")
     parser.add_argument("--no-loop-closure", action="store_true", help="Disable loop closure")
-    parser.add_argument("--dynamic-filter", action=argparse.BooleanOptionalAction, default=False, help="Enable 2D YOLO dynamic object removal")
+    parser.add_argument("--dynamic-filter", "--dymaic-filter", action=argparse.BooleanOptionalAction, dest="dynamic_filter", default=False, help="Enable 2D YOLO dynamic object removal")
     parser.add_argument("--dynamic-model", default="yolo11m-seg.pt", help="YOLO segmentation model path")
     parser.add_argument("--dynamic-conf", type=float, default=0.15, help="Confidence threshold for dynamic detection")
     parser.add_argument("--dynamic-dilate", type=int, default=11, help="Dilation kernel size for dynamic masks")

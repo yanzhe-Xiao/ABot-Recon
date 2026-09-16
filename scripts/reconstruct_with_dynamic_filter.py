@@ -182,7 +182,7 @@ def main():
     parser.add_argument("--point-stride", type=int, default=2)
     parser.add_argument("--confidence-threshold", type=float, default=0.2)
     parser.add_argument("--loop-closure", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--dynamic-filter", action=argparse.BooleanOptionalAction, default=True, help="Enable dynamic object removal")
+    parser.add_argument("--dynamic-filter", "--dymaic-filter", action=argparse.BooleanOptionalAction, dest="dynamic_filter", default=True, help="Enable dynamic object removal")
     parser.add_argument("--yolo-model", default="yolo11m-seg.pt")
     parser.add_argument("--conf-thresh", type=float, default=0.15)
     parser.add_argument("--dilate-kernel", type=int, default=11)
