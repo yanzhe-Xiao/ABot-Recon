@@ -80,6 +80,7 @@ class SequenceData:
     colors_tensor: torch.Tensor
     world_tensor: torch.Tensor
     conf_tensor: torch.Tensor
+    camera_poses: np.ndarray
     keyframe_indices: np.ndarray
     descriptors: np.ndarray
 
@@ -149,13 +150,14 @@ class Method2MultiViewFusion:
             colors = torch.load(dir_path / "colors.pt", map_location="cpu", weights_only=True)
             world = torch.load(dir_path / "world_points.pt", map_location="cpu", weights_only=True)
             conf = torch.load(dir_path / "confidence.pt", map_location="cpu", weights_only=True)
-
             pcd = o3d.io.read_point_cloud(str(ply_file))
             pcd_down = pcd.voxel_down_sample(self.downsample_voxel_size)
-
+            pose_file = dir_path / "camera_poses.npy"
+            if not pose_file.is_file():
+                raise FileNotFoundError(f"Missing camera_poses.npy in {dir_path}")
+            camera_poses = np.load(pose_file)
             kf_idx = np.arange(0, len(colors), self.keyframe_stride)
             desc = compute_descriptors(colors[kf_idx].numpy(), self.retrieval_cfg, self.device)
-
             sequences[sid] = SequenceData(
                 id=sid,
                 dir_path=dir_path,
@@ -164,11 +166,43 @@ class Method2MultiViewFusion:
                 colors_tensor=colors,
                 world_tensor=world,
                 conf_tensor=conf,
+                camera_poses=camera_poses,
                 keyframe_indices=kf_idx,
                 descriptors=desc,
             )
             print(f"    -> {len(pcd.points):,} raw points, {len(kf_idx)} keyframes indexed.")
         return sequences
+
+    @staticmethod
+    def _trajectory_prior(seq_s: SequenceData, seq_t: SequenceData) -> Optional[dict]:
+        """Estimate a map Sim(3) from camera-center trajectories.
+
+        Arc-length resampling removes different frame rates. Both temporal
+        directions are tested because independently recorded streams may walk
+        the same route in opposite directions.
+        """
+        def sample(seq: SequenceData) -> np.ndarray:
+            p = np.asarray(seq.camera_poses[:, :3, 3], dtype=np.float64)
+            d = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(p, axis=0), axis=1))]
+            if len(p) < 8 or d[-1] < 0.5:
+                return np.empty((0, 3))
+            u = np.linspace(0.0, d[-1], 40)
+            return np.stack([np.interp(u, d, p[:, k]) for k in range(3)], axis=1)
+
+        src = sample(seq_s)
+        tgt = sample(seq_t)
+        if len(src) == 0 or len(tgt) == 0:
+            return None
+        candidates = []
+        for reverse in (False, True):
+            dst = tgt[::-1] if reverse else tgt
+            s, R, t = ransac_umeyama.__globals__["umeyama_svd"](src, dst, estimate_scale=True)
+            err = np.linalg.norm(s * (src @ R.T) + t - dst, axis=1)
+            candidates.append((float(np.sqrt(np.mean(err * err))), reverse, s, R, t))
+        rmse, reverse, s, R, t = min(candidates, key=lambda x: x[0])
+        if not (0.5 <= s <= 1.5) or rmse > 0.15:
+            return None
+        return {"scale": s, "R": R, "t": t, "rmse": rmse, "reverse": reverse}
 
     def match_pair(self, seq_s: SequenceData, seq_t: SequenceData) -> Optional[EdgeResult]:
         """Match 2D features between two sequences and solve Umeyama Sim(3) + small_gicp."""
@@ -177,17 +211,32 @@ class Method2MultiViewFusion:
         if max_sim < 0.25:  # Skip completely disjoint pairs early
             return None
 
-        top_flat = np.argsort(-sim, axis=None)[: self.top_k_pairs * 2]
+        top_flat = np.argsort(-sim, axis=None)[: self.top_k_pairs * 4]
         candidate_pairs = []
-        seen = set()
+        seen_source = set()
+        seen_target = set()
         for flat in top_flat:
             i, j = np.unravel_index(flat, sim.shape)
             fs, ft = int(seq_s.keyframe_indices[i]), int(seq_t.keyframe_indices[j])
-            if fs not in seen and len(candidate_pairs) < self.top_k_pairs:
-                candidate_pairs.append((fs, ft, float(sim[i, j])))
-                seen.add(fs)
+            # A consensus built from one target frame repeatedly matched to
+            # several source frames is not multi-view evidence; it is often
+            # the same ambiguous endpoint/reflective view. Require both
+            # sides to contribute distinct keyframes.
+            if fs in seen_source or ft in seen_target:
+                continue
+            if len(candidate_pairs) >= self.top_k_pairs:
+                break
+            candidate_pairs.append((fs, ft, float(sim[i, j])))
+            seen_source.add(fs)
+            seen_target.add(ft)
 
         pair_solutions = []
+        all_p_s, all_p_t = [], []
+        candidate_models = []
+        # Keep correspondences from every viable candidate frame pair.  All
+        # world_points are expressed in the sequence map frame, so a single
+        # Sim(3) can be estimated from their union.  This prevents one
+        # visually ambiguous glass/background frame from deciding the edge.
         for fs, ft, score in candidate_pairs:
             img_s = seq_s.colors_tensor[fs].permute(2, 0, 1).float().unsqueeze(0).to(self.device) / 255.0
             img_t = seq_t.colors_tensor[ft].permute(2, 0, 1).float().unsqueeze(0).to(self.device) / 255.0
@@ -204,11 +253,12 @@ class Method2MultiViewFusion:
 
             kpts_s = feat_s["keypoints"][matches[:, 0]].cpu().numpy()
             kpts_t = feat_t["keypoints"][matches[:, 1]].cpu().numpy()
-
             p_s, p_t = [], []
+            h_s, w_s = seq_s.colors_tensor.shape[1:3]
+            h_t, w_t = seq_t.colors_tensor.shape[1:3]
             for (xa, ya), (xb, yb) in zip(kpts_s, kpts_t):
-                ia_y, ia_x = min(max(int(round(ya)), 0), 279), min(max(int(round(xa)), 0), 503)
-                ib_y, ib_x = min(max(int(round(yb)), 0), 279), min(max(int(round(xb)), 0), 503)
+                ia_y, ia_x = min(max(int(round(ya)), 0), h_s - 1), min(max(int(round(xa)), 0), w_s - 1)
+                ib_y, ib_x = min(max(int(round(yb)), 0), h_t - 1), min(max(int(round(xb)), 0), w_t - 1)
                 if seq_s.conf_tensor[fs, ia_y, ia_x] > 0.05 and seq_t.conf_tensor[ft, ib_y, ib_x] > 0.05:
                     pa = seq_s.world_tensor[fs, ia_y, ia_x].numpy()
                     pb = seq_t.world_tensor[ft, ib_y, ib_x].numpy()
@@ -216,31 +266,76 @@ class Method2MultiViewFusion:
                         p_s.append(pa)
                         p_t.append(pb)
 
-            p_s, p_t = np.array(p_s), np.array(p_t)
-            if len(p_s) >= 4:
-                res = ransac_umeyama(p_s, p_t, estimate_scale=True, iters=3000, thresh=self.ransac_thresh)
-                if res is not None:
-                    s, R, t_vec, inliers, rmse = res
-                    inlier_ratio = len(inliers) / len(p_s)
-                    pair_solutions.append({
-                        "fs": fs,
-                        "ft": ft,
-                        "matches": len(matches),
-                        "pairs": len(p_s),
-                        "inliers": len(inliers),
-                        "inlier_ratio": inlier_ratio,
-                        "scale": s,
-                        "R": R,
-                        "t": t_vec,
-                        "rmse": rmse,
-                    })
+            if len(p_s) < 4:
+                continue
+            p_s, p_t = np.asarray(p_s), np.asarray(p_t)
+            res = ransac_umeyama(p_s, p_t, estimate_scale=True, iters=3000, thresh=self.ransac_thresh)
+            if res is None:
+                continue
+            s, R, t_vec, inliers, rmse = res
+            pair_solutions.append({
+                "fs": fs, "ft": ft, "matches": len(matches), "pairs": len(p_s),
+                "inliers": len(inliers), "inlier_ratio": len(inliers) / len(p_s),
+                "scale": s, "R": R, "t": t_vec, "rmse": rmse,
+            })
+            candidate_models.append((p_s, p_t, pair_solutions[-1]))
+            print(
+                f"    [Candidate {seq_s.id}->{seq_t.id}] frames=({fs},{ft}) "
+                f"pairs={len(p_s)} inliers={len(inliers)} "
+                f"ratio={len(inliers)/len(p_s):.3f} scale={s:.4f} rmse={rmse*1000:.1f}mm"
+            )
+            all_p_s.append(p_s)
+            all_p_t.append(p_t)
 
         if not pair_solutions:
             return None
 
-        # Sort by total inliers and inlier ratio
         pair_solutions.sort(key=lambda x: (-x["inliers"], -x["inlier_ratio"], x["rmse"]))
-        best = pair_solutions[0]
+
+        def rotation_distance(a: np.ndarray, b: np.ndarray) -> float:
+            c = np.clip((np.trace(a.T @ b) - 1.0) * 0.5, -1.0, 1.0)
+            return float(np.arccos(c))
+
+        # Do not concatenate incompatible frame-pair matches. RANSAC over the
+        # union can manufacture a model from mutually wrong correspondences.
+        # Cluster candidate Sim(3) models first, then refine only the largest
+        # consistent cluster.
+        clusters = []
+        for model in pair_solutions:
+            assigned = False
+            for cluster in clusters:
+                ref = cluster[0]
+                scale_delta = abs(model["scale"] / ref["scale"] - 1.0)
+                angle_delta = rotation_distance(model["R"], ref["R"])
+                translation_delta = float(np.linalg.norm(model["t"] - ref["t"]))
+                if scale_delta < 0.08 and angle_delta < np.deg2rad(15.0) and translation_delta < 0.30:
+                    cluster.append(model)
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append([model])
+        clusters.sort(key=lambda c: (-sum(x["inliers"] for x in c), -len(c), min(x["rmse"] for x in c)))
+        if not clusters:
+            return None
+        best_cluster = clusters[0]
+        best = max(best_cluster, key=lambda x: (x["inliers"], x["inlier_ratio"], -x["rmse"]))
+        best["consistent_candidates"] = len(best_cluster)
+        print(f"  [Model consensus] {len(best_cluster)}/{len(pair_solutions)} candidate transforms agree")
+
+        # Refine from correspondences belonging only to this transform cluster.
+        agreeing_points = [(ps, pt) for ps, pt, model in candidate_models if model in best_cluster]
+        if len(agreeing_points) >= 2:
+            refined = ransac_umeyama(
+                np.concatenate([x[0] for x in agreeing_points]),
+                np.concatenate([x[1] for x in agreeing_points]),
+                estimate_scale=True, iters=5000, thresh=self.ransac_thresh,
+            )
+            if refined is not None:
+                s, R, t_vec, inliers, rmse = refined
+                best.update({"scale": s, "R": R, "t": t_vec,
+                             "inliers": int(len(inliers)),
+                             "inlier_ratio": float(len(inliers) / sum(len(x[0]) for x in agreeing_points)),
+                             "rmse": float(rmse)})
 
         # Refine with small_gicp VGICP
         pts_coarse = (np.asarray(seq_s.pcd_down.points, dtype=np.float64) * best["scale"]) @ best["R"].T + best["t"]
@@ -264,20 +359,29 @@ class Method2MultiViewFusion:
         # Edge score combines inliers and low RMSE
         edge_score = float(best["inliers"]) * (1.0 / (best["rmse"] + 0.01))
 
+        # VGICP is only a local refinement. Reject it when it decreases the
+        # actual overlap; repetitive glass/floor planes can otherwise pull a
+        # valid coarse transform away from the shared bookcase.
+        coarse_eval = o3d.geometry.PointCloud()
+        coarse_eval.points = o3d.utility.Vector3dVector(pts_coarse)
+        fine_eval = o3d.geometry.PointCloud(coarse_eval).transform(gicp_res.T_target_source)
+        target_eval = seq_t.pcd_down
+        coarse_metric = o3d.pipelines.registration.evaluate_registration(coarse_eval, target_eval, 0.08)
+        fine_metric = o3d.pipelines.registration.evaluate_registration(fine_eval, target_eval, 0.08)
+        accept_delta = fine_metric.fitness >= coarse_metric.fitness
+        T_delta = gicp_res.T_target_source if accept_delta else np.eye(4, dtype=np.float64)
+        if not accept_delta:
+            print("  [VGICP] rejected: overlap decreased")
+        T_rigid = np.eye(4, dtype=np.float64)
+        T_rigid[:3, :3] = best["R"]
+        T_rigid[:3, 3] = best["t"]
+        T_fine = T_delta @ T_rigid
         return EdgeResult(
-            src=seq_s.id,
-            tgt=seq_t.id,
-            fs=best["fs"],
-            ft=best["ft"],
-            matches=best["matches"],
-            inliers=best["inliers"],
-            inlier_ratio=best["inlier_ratio"],
-            scale=best["scale"],
-            R=best["R"],
-            t=best["t"],
-            rmse=best["rmse"],
-            T_fine=T_fine,
-            score=edge_score,
+            src=seq_s.id, tgt=seq_t.id, fs=best["fs"], ft=best["ft"],
+            matches=best["matches"], inliers=best["inliers"],
+            inlier_ratio=best["inlier_ratio"], scale=best["scale"],
+            R=best["R"], t=best["t"], rmse=best["rmse"],
+            T_fine=T_fine, score=edge_score,
         )
 
     def build_spanning_tree(
@@ -285,10 +389,7 @@ class Method2MultiViewFusion:
         sequences: Dict[str, SequenceData],
         anchor_id: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Tuple[float, np.ndarray]], List[EdgeResult]]:
-        """
-        Build registration graph, choose optimal anchor sequence,
-        and compute Maximum Spanning Tree (MST) transforms to anchor.
-        """
+        """Build the registration graph and propagate transforms."""
         seq_ids = list(sequences.keys())
         print(f"\n[Graph] Evaluating pairwise connectivity across {len(seq_ids)} sequences...")
 

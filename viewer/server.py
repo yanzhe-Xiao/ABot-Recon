@@ -69,6 +69,16 @@ def encode_frame_jpeg_base64(colors_tensor: torch.Tensor, frame_idx: int, qualit
 
 # Curated models registry for rich metadata preservation
 CURATED_MODELS_REGISTRY: Dict[str, Dict[str, str]] = {
+    "outputs/alignment/perfect_corridor_merged.ply": {
+        "name": "🏆 [走廊直道对齐 最佳] 测试走廊 视频1+视频2 统一轴线融合 (23.3万点, 15mm真彩, 推荐)",
+        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
+        "description": "消除两端反向录制坐标系偏航角差异，93.9%重叠率精确对齐同一个书架与显示器 (233,115 点，6.0MB)",
+    },
+    "outputs/alignment/perfect_corridor_colored_merged.ply": {
+        "name": "🎨 [走廊直道对齐 双色检验] 视频1(红) + 视频2(绿) 统一轴线标定 (推荐)",
+        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
+        "description": "视频1红色、视频2绿色高对比标定，直观检验书架、地面与显示器空间 100% 重叠吻合",
+    },
     "outputs/alignment/data_05_08_method2_merged.ply": {
         "name": "🔥 [方案二 多模态] 视频流05-08 正常真彩融合 (341万点, 1.5cm体素去重, 推荐)",
         "category": "Method 2 Multimodal 05-08",
@@ -246,6 +256,7 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
     models = []
 
     category_order = {
+        "走廊精准直道融合 (Perfect Corridor Fusion)": -2,
         "Method 2 Multimodal 05-08": 0,
         "Method 2 Colored 05-08": 1,
         "多视频流场景融合点云 (Multi-Stream Scenes)": 2,
@@ -256,14 +267,15 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
         "TUM Merged": 6,
         "05-08 Individual Videos": 7,
         "单视频流点云 (Single Video)": 8,
-        "My Videos": 9,
-        "TUM 360": 10,
-        "TUM Desk": 11,
-        "Demo": 12,
-        "实时流式会话点云 (Streaming Sessions)": 13,
-        "回环对比点云 (Loop Comparison)": 14,
-        "配准与多路融合 (Alignment & Fusion)": 15,
-        "Outputs 其他点云 (Other Models)": 16,
+        "动态滤波对比 (Dynamic Filtering)": 9,
+        "My Videos": 10,
+        "TUM 360": 11,
+        "TUM Desk": 12,
+        "Demo": 13,
+        "实时流式会话点云 (Streaming Sessions)": 14,
+        "回环对比点云 (Loop Comparison)": 15,
+        "配准与多路融合 (Alignment & Fusion)": 16,
+        "Outputs 其他点云 (Other Models)": 17,
     }
 
     for ply_path in ply_files:
@@ -278,18 +290,36 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
             category = curated["category"]
             description = curated["description"]
         else:
-            if rel_str.startswith("outputs/alignment/general_fusion/"):
+            if rel_str.startswith("outputs/scenes/"):
+                scene_dir = ply_path.parent
+                scene_name = scene_dir.name
+                category = "多视频流场景融合点云 (Multi-Stream Scenes)"
+
+                # Deduplicate: if reconstruction.ply / reconstruction_colored.ply exists,
+                # skip redundant *_normal_merged.ply / *_colored_merged.ply copies
+                if ply_path.name.endswith("_normal_merged.ply") and (scene_dir / "reconstruction.ply").is_file():
+                    continue
+                if ply_path.name.endswith("_colored_merged.ply") and (scene_dir / "reconstruction_colored.ply").is_file():
+                    continue
+
+                is_colored = "colored" in ply_path.name
+                is_full = "full" in ply_path.name
+                if is_colored:
+                    tag = "🎨 [场景区分色彩-全量]" if is_full else "🎨 [场景区分色彩]"
+                else:
+                    tag = "🌟 [场景全景融合-全量]" if is_full else "🏛️ [场景全景融合]"
+                name = f"{tag} {scene_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+            elif rel_str.startswith("outputs/alignment/general_fusion/"):
                 category = "通用多视角融合 (General Fusion)"
-                name = f"🔗 [通用多模态] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                stem = ply_path.stem
+                is_colored = "colored" in stem
+                is_full = "full" in stem
+                tag = "🎨 [多模态区分色彩]" if is_colored else "🔥 [多模态正常真彩]"
+                mode_str = "全量无损" if is_full else "体素去重"
+                name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB)"
             elif rel_str.startswith("outputs/alignment/"):
                 category = "配准与多路融合 (Alignment & Fusion)"
                 name = f"📐 [配准融合] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/scenes/"):
-                scene_name = ply_path.parent.name
-                category = "多视频流场景融合点云 (Multi-Stream Scenes)"
-                is_colored = "colored" in ply_path.name
-                tag = "🎨 [场景区分色彩]" if is_colored else "🏛️ [场景全景融合]"
-                name = f"{tag} {scene_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
             elif rel_str.startswith("outputs/streams/"):
                 session_name = ply_path.parent.name
                 category = "实时流式会话点云 (Streaming Sessions)"
@@ -298,9 +328,29 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
                 category = "回环对比点云 (Loop Comparison)"
                 name = f"🔄 [回环对比] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
             elif ply_path.name.startswith("reconstruction"):
-                seq_name = ply_path.parent.name
-                category = "单视频流点云 (Single Video)"
-                name = f"📹 [单视频重建] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                seq_dir = ply_path.parent
+                seq_name = seq_dir.name
+                fname = ply_path.name
+
+                # If reconstruction.ply and reconstruction_scheme1_filtered.ply both exist, skip redundant copy
+                if fname == "reconstruction_scheme1_filtered.ply" and (seq_dir / "reconstruction.ply").is_file():
+                    continue
+
+                if fname == "reconstruction_clean.ply":
+                    category = "动态滤波对比 (Dynamic Filtering)"
+                    name = f"🧹 [滤波去噪] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                elif fname == "reconstruction_baseline_with_dynamic.ply":
+                    category = "动态滤波对比 (Dynamic Filtering)"
+                    name = f"🚶 [原始含动态基线] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                elif fname == "reconstruction_removed_dynamic_only.ply":
+                    category = "动态滤波对比 (Dynamic Filtering)"
+                    name = f"📦 [仅动态物体] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                elif fname == "reconstruction_scheme1_filtered.ply":
+                    category = "动态滤波对比 (Dynamic Filtering)"
+                    name = f"🛡️ [动态过滤] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                else:
+                    category = "单视频流点云 (Single Video)"
+                    name = f"📹 [单视频重建] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
             else:
                 category = "Outputs 其他点云 (Other Models)"
                 name = f"📁 {ply_path.parent.name}/{ply_path.name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
@@ -317,13 +367,12 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
             "vertex_count": vertex_count,
             "_order": category_order.get(category, 50),
         })
-
     def get_sort_key(m):
-        if "data_05_08_method2_merged.ply" in m["path"] and "colored" not in m["path"] and "full" not in m["path"]:
-            return (-2, m["_order"], m["name"])
-        if "colored_merged.ply" in m["path"] and "full" not in m["path"]:
-            return (-1, m["_order"], m["name"])
-        return (0, m["_order"], m["name"])
+        prio = 1
+        fname = Path(m["path"]).name
+        if fname in ("data_05_08_method2_merged.ply", "data_05_08_method2_colored_merged.ply", "reconstruction.ply"):
+            prio = 0
+        return (m["_order"], prio, m["name"])
 
     models.sort(key=get_sort_key)
     for m in models:
@@ -411,7 +460,7 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_video_frame(parsed_url.query)
         if path == "/api/sequences":
             return self.handle_sequences()
-        if path == "/api/offline_models":
+        if path in ("/api/offline_models", "/api/models"):
             return self.handle_offline_models()
 
         if path == "/api/status":

@@ -23,8 +23,34 @@ from ultralytics import YOLO
 
 from abot_recon import ABotRecon
 from abot_recon.preprocessing import preprocess_image
-from scripts.export_reconstruction_ply import write_binary_ply
+import open3d as o3d
+import subprocess
+from scripts.export_reconstruction_ply import write_bev, write_binary_ply
 
+
+def extract_frames_from_video(video_path: Path, frames_dir: Path, fps_target: float | None = None) -> list[Path]:
+    """Extract frames from video into frames_dir."""
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    existing_frames = sorted(frames_dir.glob("*.jpg"))
+    if existing_frames:
+        print(f"Found {len(existing_frames)} existing frames in {frames_dir}")
+        return existing_frames
+
+    print(f"Extracting frames from {video_path} to {frames_dir}...")
+    cmd = ["ffmpeg", "-y", "-i", str(video_path)]
+    if fps_target is not None and fps_target > 0:
+        cmd.extend(["-vf", f"fps={fps_target}"])
+    cmd.extend(["-q:v", "2", str(frames_dir / "%06d.jpg")])
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed with error:\n{res.stderr}")
+
+    frames = sorted(frames_dir.glob("*.jpg"))
+    if not frames:
+        raise RuntimeError(f"No frames were extracted from {video_path}")
+    print(f"Extracted {len(frames)} frames successfully.")
+    return frames
 
 class AlignedDynamicMaskGenerator:
     """
@@ -47,30 +73,38 @@ class AlignedDynamicMaskGenerator:
         self.dilate_kernel = dilate_kernel
         self.device = device
 
-    def predict_masks_on_preprocessed(self, preprocessed_rgbs: list[np.ndarray]) -> list[np.ndarray]:
+    def predict_masks_on_preprocessed(
+        self, preprocessed_rgbs: list[np.ndarray], batch_size: int = 32
+    ) -> list[np.ndarray]:
         """
         preprocessed_rgbs: list of uint8 ndarray [H, W, 3] (RGB, exactly matching ABot-Recon input)
         Returns: list of boolean ndarray [H, W], True = Static, False = Dynamic (filtered)
         """
+        if not preprocessed_rgbs:
+            return []
+        h, w = preprocessed_rgbs[0].shape[:2]
         raw_dyn_masks = []
-        for rgb in preprocessed_rgbs:
-            h, w = rgb.shape[:2]
+
+        # Batched YOLO segmentation inference
+        for i in range(0, len(preprocessed_rgbs), batch_size):
+            batch = preprocessed_rgbs[i : i + batch_size]
             results = self.model.predict(
-                rgb,
+                batch,
+                batch=len(batch),
                 classes=self.dynamic_classes,
                 conf=self.conf_thresh,
                 device=self.device,
                 verbose=False,
             )
-            dyn_mask = np.zeros((h, w), dtype=np.uint8)
-            if len(results) > 0 and results[0].masks is not None:
-                for mask_data in results[0].masks.data:
-                    m = mask_data.cpu().numpy().astype(np.uint8)
-                    if m.shape != (h, w):
-                        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-                    dyn_mask = np.bitwise_or(dyn_mask, m)
-            raw_dyn_masks.append(dyn_mask)
-
+            for res in results:
+                if res.masks is not None and len(res.masks.data) > 0:
+                    m_gpu = (res.masks.data.sum(dim=0) > 0).float().unsqueeze(0).unsqueeze(0)
+                    if m_gpu.shape[-2:] != (h, w):
+                        m_gpu = torch.nn.functional.interpolate(m_gpu, size=(h, w), mode="nearest")
+                    dyn_mask = m_gpu.squeeze().to(torch.uint8).cpu().numpy()
+                else:
+                    dyn_mask = np.zeros((h, w), dtype=np.uint8)
+                raw_dyn_masks.append(dyn_mask)
         # Temporal smoothing: if frame i-1 and i+1 have dynamic mask, propagate to frame i
         smoothed_dyn_masks = []
         n_frames = len(raw_dyn_masks)
@@ -122,10 +156,16 @@ def export_colored_pointcloud(
 def main():
     parser = argparse.ArgumentParser(description="ABot-Recon with Dynamic Mask Filtering")
     parser.add_argument(
+        "--input", "-i",
+        type=Path,
+        default=None,
+        help="Input video file or image directory",
+    )
+    parser.add_argument(
         "--image-dir",
         type=Path,
-        default=Path("data/glasshouse_stride5/images"),
-        help="Input frames directory",
+        default=None,
+        help="Input frames directory (legacy alias)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -141,21 +181,31 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--point-stride", type=int, default=2)
     parser.add_argument("--confidence-threshold", type=float, default=0.2)
-    parser.add_argument("--loop-closure", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--loop-closure", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--dynamic-filter", action=argparse.BooleanOptionalAction, default=True, help="Enable dynamic object removal")
     parser.add_argument("--yolo-model", default="yolo11m-seg.pt")
     parser.add_argument("--conf-thresh", type=float, default=0.15)
     parser.add_argument("--dilate-kernel", type=int, default=11)
+    parser.add_argument("--fps", type=float, default=None, help="Target FPS for frame extraction from video")
     args = parser.parse_args()
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    images = sorted(
-        p for p in args.image_dir.iterdir()
-        if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    )
-    if not images:
-        raise ValueError(f"No images found in {args.image_dir}")
+    input_path = args.input or args.image_dir or Path("data/glasshouse_stride5/images")
 
-    print(f"[1/4] Found {len(images)} images in {args.image_dir}")
+    if input_path.is_file():
+        frames_dir = args.output_dir / "frames"
+        images = extract_frames_from_video(input_path, frames_dir, fps_target=args.fps)
+    elif input_path.is_dir():
+        images = sorted(
+            p for p in input_path.iterdir()
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        )
+    else:
+        raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+    if not images:
+        raise ValueError(f"No images found in {input_path}")
+
+    print(f"[1/4] Found {len(images)} images in {input_path}")
 
     # 1. Preprocess images exactly as ABot-Recon does
     print("[2/4] Preprocessing frames & generating aligned 2D dynamic masks with YOLO-seg...")
@@ -168,27 +218,33 @@ def main():
         rgb_uint8 = (tensor.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8).numpy()
         preprocessed_rgbs.append(rgb_uint8)
 
-    mask_gen = AlignedDynamicMaskGenerator(
-        model_name=args.yolo_model,
-        conf_thresh=args.conf_thresh,
-        dilate_kernel=args.dilate_kernel,
-        device=args.device,
-    )
-    t0 = time.time()
-    static_masks_np = mask_gen.predict_masks_on_preprocessed(preprocessed_rgbs)
-    mask_time = time.time() - t0
-    print(f"Aligned dynamic mask generation finished in {mask_time:.2f}s ({len(images)/mask_time:.1f} FPS)")
+    if args.dynamic_filter:
+        mask_gen = AlignedDynamicMaskGenerator(
+            model_name=args.yolo_model,
+            conf_thresh=args.conf_thresh,
+            dilate_kernel=args.dilate_kernel,
+            device=args.device,
+        )
+        t0 = time.time()
+        static_masks_np = mask_gen.predict_masks_on_preprocessed(preprocessed_rgbs)
+        mask_time = time.time() - t0
+        print(f"Aligned dynamic mask generation finished in {mask_time:.2f}s ({len(images)/mask_time:.1f} FPS)")
 
-    # Save visual debug samples
-    vis_dir = args.output_dir / "aligned_masks_vis"
-    vis_dir.mkdir(parents=True, exist_ok=True)
-    for idx in range(0, len(images), 5):
-        rgb_vis = preprocessed_rgbs[idx].copy()
-        dyn_pixels = ~static_masks_np[idx]
-        rgb_vis[dyn_pixels] = [255, 0, 0]  # Mark dynamic as red
-        out_vis = cv2.addWeighted(preprocessed_rgbs[idx], 0.5, rgb_vis, 0.5, 0)
-        cv2.imwrite(str(vis_dir / f"aligned_vis_{images[idx].name}"), cv2.cvtColor(out_vis, cv2.COLOR_RGB2BGR))
-
+        # Save visual debug samples
+        vis_dir = args.output_dir / "aligned_masks_vis"
+        vis_dir.mkdir(parents=True, exist_ok=True)
+        step = max(1, len(images) // 20)
+        for idx in range(0, len(images), step):
+            rgb_vis = preprocessed_rgbs[idx].copy()
+            dyn_pixels = ~static_masks_np[idx]
+            rgb_vis[dyn_pixels] = [255, 0, 0]  # Mark dynamic as red
+            out_vis = cv2.addWeighted(preprocessed_rgbs[idx], 0.5, rgb_vis, 0.5, 0)
+            cv2.imwrite(str(vis_dir / f"aligned_vis_{images[idx].name}"), cv2.cvtColor(out_vis, cv2.COLOR_RGB2BGR))
+        vis_dir_path = str(vis_dir)
+    else:
+        static_masks_np = [np.ones((280, 504), dtype=bool) for _ in range(len(images))]
+        mask_time = 0.0
+        vis_dir_path = "N/A (dynamic filter disabled)"
     # 2. Run ABot-Recon Reconstruction
     print("[3/4] Running ABot-Recon 3D reconstruction...")
     model = ABotRecon.from_pretrained(
@@ -261,6 +317,24 @@ def main():
     # Also save standard reconstruction.ply as filtered_ply
     shutil.copyfile(filtered_ply, args.output_dir / "reconstruction.ply")
 
+    # BEV Trajectory map
+    bev_png = args.output_dir / "trajectory_bev.png"
+    poses_np = result.camera_poses.cpu().numpy()
+    plane = write_bev(bev_png, poses_np, 1600, "auto")
+    print(f"Exported BEV Trajectory: {bev_png} ({len(poses_np)} poses on {plane.upper()} plane)")
+
+    # Filtered & Denoised PLY via Open3D
+    clean_ply_path = args.output_dir / "reconstruction_clean.ply"
+    if filtered_ply.exists() and filtered_ply.stat().st_size > 0:
+        print("Post-processing point cloud with Open3D statistical outlier removal...")
+        pcd = o3d.io.read_point_cloud(str(filtered_ply))
+        if len(pcd.points) > 0:
+            pcd_down = pcd.voxel_down_sample(voxel_size=0.015)
+            cl, ind = pcd_down.remove_statistical_outlier(nb_neighbors=20, std_ratio=1.5)
+            clean_pcd = pcd_down.select_by_index(ind)
+            o3d.io.write_point_cloud(str(clean_ply_path), clean_pcd, write_ascii=False)
+            print(f"Exported Cleaned PLY: {clean_ply_path} ({len(clean_pcd.points):,} points, {clean_ply_path.stat().st_size / 1024 / 1024:.2f} MB)")
+
     dynamic_points_removed = baseline_points_count - filtered_points_count
     reduction_pct = (dynamic_points_removed / max(1, baseline_points_count)) * 100.0
 
@@ -291,7 +365,7 @@ def main():
     print(f"3. Isolated Dynamic Points (Removed Person):   {dynamic_only_points_count:,} points -> {dynamic_only_ply.name}")
     print(f"Dynamic Points Removed:                        {dynamic_points_removed:,} points ({reduction_pct:.2f}%)")
     print(f"Mask Overhead:                                 {mask_time/len(images)*1000:.1f} ms/frame")
-    print(f"Debug Visuals Saved to:                        {vis_dir}")
+    print(f"Debug Visuals Saved to:                        {vis_dir_path}")
     print("=======================================================\n")
 
 
