@@ -54,6 +54,7 @@ if str(REPO_ROOT) not in sys.path:
 from abot_recon.sparse_loop.retrieval import RetrievalConfig, compute_descriptors
 from lightglue import ALIKED, LightGlue
 from lightglue.utils import rbd
+from scripts.optimize_fused_pointcloud import PostFusionOptimizer
 from scripts.align_method2_lightglue_umeyama import ransac_umeyama
 
 
@@ -417,6 +418,7 @@ class Method2MultiViewFusion:
         enable_sor: bool = True,
         multi_scale_icp: bool = True,
         bev_size: int = 1600,
+        enable_post_optimize: bool = True,
     ):
         self.device = torch.device(device)
         self.keyframe_stride = max(1, keyframe_stride)
@@ -428,6 +430,7 @@ class Method2MultiViewFusion:
         self.enable_sor = enable_sor
         self.multi_scale_icp = multi_scale_icp
         self.bev_size = bev_size
+        self.enable_post_optimize = enable_post_optimize
 
         print(f"[Engine] Initializing models on {self.device}...")
         self.extractor = ALIKED(max_num_keypoints=2048).eval().to(self.device)
@@ -886,6 +889,35 @@ class Method2MultiViewFusion:
                 f"Precision @ 5cm = {m_info['precision_at_5cm_pct']:.1f}%"
             )
 
+        # Post-Fusion Optimization: Dense Submap ICP, Surface Thinning, Color Harmonization
+        post_opt_stats = {}
+        optimizer = None
+        if self.enable_post_optimize and len(sequences) >= 2:
+            print("\n[Step 3.5] Running Post-Fusion Multi-Way Optimization (Dense ICP)...")
+            optimizer = PostFusionOptimizer(
+                voxel_size=self.merge_voxel_size,
+                enable_submap_icp=True,
+                enable_plane_leveling=True,
+                enable_surface_thinning=True,
+                enable_color_harmonization=True,
+                enable_sor=self.enable_sor,
+            )
+            submaps_for_opt = {}
+            for sid, p_full in zip(sequences.keys(), aligned_normal):
+                p_down = p_full.voxel_down_sample(0.02)
+                p_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.08, max_nn=30))
+                submaps_for_opt[sid] = {"full": p_full, "down": p_down, "scale": transforms[sid][0], "T": transforms[sid][1]}
+
+            refined_deltas, icp_stats = optimizer.refine_submaps_dense_icp(submaps_for_opt, anchor_id=anchor)
+            for idx, sid in enumerate(sequences.keys()):
+                delta = refined_deltas.get(sid, np.eye(4, dtype=np.float64))
+                aligned_normal[idx].transform(delta)
+                aligned_colored[idx].transform(delta)
+                transformed_trajectories[sid][:, :3, :3] = delta[:3, :3] @ transformed_trajectories[sid][:, :3, :3]
+                transformed_trajectories[sid][:, :3, 3] = (transformed_trajectories[sid][:, :3, 3] @ delta[:3, :3].T) + delta[:3, 3]
+                transforms[sid] = (transforms[sid][0], delta @ transforms[sid][1])
+                point_stats[sid]["transform_matrix"] = transforms[sid][1].tolist()
+            post_opt_stats["submap_icp"] = icp_stats
         # 5. Merge point clouds
         print("\n[Step 4] Merging raw point clouds...")
         full_normal = o3d.geometry.PointCloud()
@@ -900,6 +932,12 @@ class Method2MultiViewFusion:
         dedup_normal = full_normal.voxel_down_sample(self.merge_voxel_size)
         dedup_colored = full_colored.voxel_down_sample(self.merge_voxel_size)
         print(f"  De-duplicated normal points:  {len(dedup_normal.points):,}")
+        # Post-Fusion Optimization: MLS Surface Thinning & Color Harmonization
+        if self.enable_post_optimize and optimizer is not None:
+            dedup_normal = optimizer.apply_bilateral_surface_thinning(dedup_normal)
+            dedup_colored.points = dedup_normal.points
+            dedup_normal = optimizer.apply_color_harmonization(dedup_normal)
+
         print(f"  De-duplicated colored points: {len(dedup_colored.points):,}")
 
         if self.enable_sor and len(dedup_normal.points) > 1000:
@@ -1056,6 +1094,12 @@ def main() -> None:
         help="Resolution of the multi-stream BEV trajectory canvas",
     )
     parser.add_argument(
+        "--post-optimize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable post-fusion dense ICP, plane leveling, and surface smoothing",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda:0" if torch.cuda.is_available() else "cpu",
@@ -1070,6 +1114,7 @@ def main() -> None:
         enable_sor=args.sor_filter,
         multi_scale_icp=args.multi_scale_icp,
         bev_size=args.bev_size,
+        enable_post_optimize=args.post_optimize,
     )
     engine.fuse(
         recon_dirs=args.recon_dirs,
