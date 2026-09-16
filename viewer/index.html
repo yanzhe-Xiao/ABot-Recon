@@ -1571,22 +1571,6 @@
         btnRefresh.addEventListener('click', () => refreshOfflineModels(true));
       }
 
-      // Background auto-polling every 4 seconds
-      let lastModelsSig = "";
-      setInterval(async () => {
-        try {
-          const resp = await fetch('/api/offline_models?t=' + Date.now());
-          if (!resp.ok) return;
-          const models = await resp.json();
-          const sig = models.map(m => m.path + ':' + m.size_bytes).join('|');
-          if (lastModelsSig && sig !== lastModelsSig) {
-            console.log("Detected outputs directory changes, refreshing...");
-            populateModelSelect(models, false);
-            showToast(`✨ 检测到 outputs 目录新增/更新点云，已自动同步！(共 ${models.length} 个模型)`);
-          }
-          lastModelsSig = sig;
-        } catch (e) {}
-      }, 4000);
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', startApp);

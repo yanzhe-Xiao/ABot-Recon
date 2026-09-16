@@ -93,15 +93,21 @@ def format_point_count(count: Optional[int]) -> str:
         return f"{count / 10000:.1f}万点"
     return f"{count:,}点"
 
-def scan_all_ply_models() -> List[Dict[str, Any]]:
-    """Scan outputs/ directory dynamically and categorize all .ply point clouds with smart path rules."""
+_SCAN_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+
+def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
+    """Scan outputs/ directory dynamically with 3-second cache to prevent redundant disk I/O."""
+    global _SCAN_CACHE
+    now = time.time()
+    if not force and (now - _SCAN_CACHE[0] < 3.0):
+        return _SCAN_CACHE[1]
+
     outputs_dir = ROOT_DIR / "outputs"
     if not outputs_dir.is_dir():
         return []
 
     ply_files = sorted(outputs_dir.glob("**/*.ply"))
     models = []
-
     category_priority = {
         "🔥 多视角融合点云 (Multi-Stream Fusion)": 0,
         "📹 单视频重建点云 (Single Video)": 1,
@@ -196,6 +202,7 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
     models.sort(key=lambda m: (m["_prio"], -m["mtime"], m["name"]))
     for m in models:
         m.pop("_prio", None)
+    _SCAN_CACHE = (now, models)
     return models
 
 def generate_orbital_poses(points_xyz: np.ndarray, num_poses: int = 60) -> List[List[List[float]]]:
