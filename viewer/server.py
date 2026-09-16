@@ -297,7 +297,7 @@ def format_point_count(count: Optional[int]) -> str:
     return f"{count:,}点"
 
 def scan_all_ply_models() -> List[Dict[str, Any]]:
-    """Scan /home/data/xyz/ABot-Recon/outputs recursively for all .ply point clouds."""
+    """Scan outputs/ directory dynamically and categorize all .ply point clouds with smart path rules."""
     outputs_dir = ROOT_DIR / "outputs"
     if not outputs_dir.is_dir():
         return []
@@ -305,29 +305,17 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
     ply_files = sorted(outputs_dir.glob("**/*.ply"))
     models = []
 
-    category_order = {
-        "走廊三段视频融合 (Video 1-3 Fusion)": -10,
-        "视频 1-3 独立点云 (Video 1-3 Individual)": -9,
-        "走廊精准直道融合 (Perfect Corridor Fusion)": -2,
-        "Method 2 Multimodal 05-08": 0,
-        "Method 2 Colored 05-08": 1,
-        "多视频流场景融合点云 (Multi-Stream Scenes)": 2,
-        "通用多视角融合 (General Fusion)": 3,
-        "Method 2 Multimodal": 4,
-        "Method 1 Geometric": 4,
-        "R3PM-Net Merged": 5,
-        "TUM Merged": 6,
-        "05-08 Individual Videos": 7,
-        "单视频流点云 (Single Video)": 8,
-        "动态滤波对比 (Dynamic Filtering)": 9,
-        "My Videos": 10,
-        "TUM 360": 11,
-        "TUM Desk": 12,
-        "Demo": 13,
-        "实时流式会话点云 (Streaming Sessions)": 14,
-        "回环对比点云 (Loop Comparison)": 15,
-        "配准与多路融合 (Alignment & Fusion)": 16,
-        "Outputs 其他点云 (Other Models)": 17,
+    category_priority = {
+        "🔥 多视角融合点云 (Multi-Stream Fusion)": 0,
+        "📹 单视频重建点云 (Single Video)": 1,
+        "🧹 滤波去噪点云 (Denoised Cleaned)": 2,
+        "🛡️ 动态过滤静态底图 (Filtered Static Map)": 3,
+        "🚶 原始含动态基线 (Baseline with Dynamic)": 4,
+        "📦 仅动态物体 (Removed Dynamic Only)": 5,
+        "🏛️ 场景全景融合 (Scene Fusion)": 6,
+        "📡 实时流式会话 (Streaming Sessions)": 7,
+        "🔄 回环与轨迹对比 (Loop Comparison)": 8,
+        "📁 输出点云 (Outputs Point Clouds)": 9,
     }
 
     for ply_path in ply_files:
@@ -335,79 +323,65 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
         url = f"/{rel_str}"
         vertex_count, size_mb = get_ply_header_info(ply_path)
         size_bytes = ply_path.stat().st_size
+        mtime = ply_path.stat().st_mtime
+        mtime_str = time.strftime("%m-%d %H:%M", time.localtime(mtime))
+        folder_name = ply_path.parent.name
+        stem = ply_path.stem
+        fname = ply_path.name
 
-        if rel_str in CURATED_MODELS_REGISTRY:
-            curated = CURATED_MODELS_REGISTRY[rel_str]
-            name = curated["name"]
-            category = curated["category"]
-            description = curated["description"]
-        else:
-            if rel_str.startswith("outputs/scenes/"):
-                scene_dir = ply_path.parent
-                scene_name = scene_dir.name
-                category = "多视频流场景融合点云 (Multi-Stream Scenes)"
-
-                # Deduplicate: if reconstruction.ply / reconstruction_colored.ply exists,
-                # skip redundant *_normal_merged.ply / *_colored_merged.ply copies
-                if ply_path.name.endswith("_normal_merged.ply") and (scene_dir / "reconstruction.ply").is_file():
-                    continue
-                if ply_path.name.endswith("_colored_merged.ply") and (scene_dir / "reconstruction_colored.ply").is_file():
-                    continue
-
-                is_colored = "colored" in ply_path.name
-                is_full = "full" in ply_path.name
-                if is_colored:
-                    tag = "🎨 [场景区分色彩-全量]" if is_full else "🎨 [场景区分色彩]"
-                else:
-                    tag = "🌟 [场景全景融合-全量]" if is_full else "🏛️ [场景全景融合]"
-                name = f"{tag} {scene_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/alignment/general_fusion/"):
-                category = "通用多视角融合 (General Fusion)"
-                stem = ply_path.stem
-                is_colored = "colored" in stem
-                is_full = "full" in stem
-                tag = "🎨 [多模态区分色彩]" if is_colored else "🔥 [多模态正常真彩]"
-                mode_str = "全量无损" if is_full else "体素去重"
-                name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/alignment/"):
-                category = "配准与多路融合 (Alignment & Fusion)"
-                name = f"📐 [配准融合] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/streams/"):
-                session_name = ply_path.parent.name
-                category = "实时流式会话点云 (Streaming Sessions)"
-                name = f"📡 [流式会话] {session_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/loop_comparison/"):
-                category = "回环对比点云 (Loop Comparison)"
-                name = f"🔄 [回环对比] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif ply_path.name.startswith("reconstruction"):
-                seq_dir = ply_path.parent
-                seq_name = seq_dir.name
-                fname = ply_path.name
-
-                # If reconstruction.ply and reconstruction_scheme1_filtered.ply both exist, skip redundant copy
-                if fname == "reconstruction_scheme1_filtered.ply" and (seq_dir / "reconstruction.ply").is_file():
-                    continue
-
-                if fname == "reconstruction_clean.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🧹 [滤波去噪] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_baseline_with_dynamic.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🚶 [原始含动态基线] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_removed_dynamic_only.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"📦 [仅动态物体] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_scheme1_filtered.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🛡️ [动态过滤] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                else:
-                    category = "单视频流点云 (Single Video)"
-                    name = f"📹 [单视频重建] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+        # 1. Multi-Stream / General Fusion
+        if "fusion" in rel_str or "merged" in stem or "fused_" in stem:
+            category = "🔥 多视角融合点云 (Multi-Stream Fusion)"
+            is_colored = "colored" in stem
+            is_full = "full" in stem
+            tag = "🎨 [区分色彩]" if is_colored else "🌟 [正常真彩]"
+            mode_str = "全量无损" if is_full else "体素去重"
+            if "fused_" in stem:
+                parts = stem.split("_")
+                num_streams = f"{parts[1]}路" if len(parts) > 1 and parts[1].isdigit() else ""
+                name = f"{tag} {num_streams}融合-{mode_str} ({folder_name}/{stem}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
             else:
-                category = "Outputs 其他点云 (Other Models)"
-                name = f"📁 {ply_path.parent.name}/{ply_path.name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 2. Dynamic Filtering Contrast
+        elif fname in ("reconstruction_clean.ply", "reconstruction_baseline_with_dynamic.ply", "reconstruction_removed_dynamic_only.ply", "reconstruction_scheme1_filtered.ply") or "dynamic" in fname or "clean" in fname:
+            if "clean" in fname:
+                category = "🧹 滤波去噪点云 (Denoised Cleaned)"
+                tag = "🧹 [滤波去噪]"
+            elif "baseline" in fname:
+                category = "🚶 原始含动态基线 (Baseline with Dynamic)"
+                tag = "🚶 [含动态基线]"
+            elif "removed" in fname or "dynamic_only" in fname:
+                category = "📦 仅动态物体 (Removed Dynamic Only)"
+                tag = "📦 [仅动态物体]"
+            else:
+                category = "🛡️ 动态过滤静态底图 (Filtered Static Map)"
+                tag = "🛡️ [静态过滤]"
+            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 3. Single Video Reconstructions
+        elif fname == "reconstruction.ply" or (ply_path.parent / "metadata.json").is_file():
+            category = "📹 单视频重建点云 (Single Video)"
+            name = f"📹 [单视频重建] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 4. Multi-Stream Scenes
+        elif "scenes" in rel_str:
+            category = "🏛️ 场景全景融合 (Scene Fusion)"
+            is_colored = "colored" in stem
+            tag = "🎨 [场景多色]" if is_colored else "🏛️ [场景全景]"
+            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 5. Streaming Sessions
+        elif "streams" in rel_str:
+            category = "📡 实时流式会话 (Streaming Sessions)"
+            name = f"📡 [流式会话] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 6. Loop Comparison
+        elif "loop" in rel_str:
+            category = "🔄 回环与轨迹对比 (Loop Comparison)"
+            tag = "🔄 [回环优化]" if "loop" in stem else "🚀 [原始流式]"
+            name = f"{tag} {folder_name}/{stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 7. Other Arbitrary Outputs
+        else:
+            category = "📁 输出点云 (Outputs Point Clouds)"
+            name = f"📁 {folder_name}/{fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
 
-            description = f"文件路径: {rel_str} | 大小: {size_mb:.2f}MB" + (f" | 点数: {vertex_count:,}" if vertex_count else "")
+        description = f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 点数: {vertex_count:,} | 时间: {mtime_str}" if vertex_count else f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 时间: {mtime_str}"
 
         models.append({
             "url": url,
@@ -417,20 +391,14 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
             "description": description,
             "size_bytes": size_bytes,
             "vertex_count": vertex_count,
-            "_order": category_order.get(category, 50),
+            "mtime": mtime,
+            "_prio": category_priority.get(category, 50),
         })
-    def get_sort_key(m):
-        prio = 1
-        fname = Path(m["path"]).name
-        if "fused_3_streams_normal_merged.ply" in m["path"]:
-            prio = -10
-        elif fname in ("data_05_08_method2_merged.ply", "data_05_08_method2_colored_merged.ply", "reconstruction.ply"):
-            prio = 0
-        return (m["_order"], prio, m["name"])
 
-    models.sort(key=get_sort_key)
+    # Sort models: Primary key is category priority, Secondary key is mtime descending (newest files on top!)
+    models.sort(key=lambda m: (m["_prio"], -m["mtime"], m["name"]))
     for m in models:
-        m.pop("_order", None)
+        m.pop("_prio", None)
     return models
 
 def generate_orbital_poses(points_xyz: np.ndarray, num_poses: int = 60) -> List[List[List[float]]]:
@@ -664,26 +632,29 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 "description": item["description"],
             })
 
-        # 2. Raw video sequences
+        # 2. Dynamically scan outputs/**/frames for any extracted video frames
+        outputs_dir = ROOT_DIR / "outputs"
+        dynamic_frames = []
+        if outputs_dir.is_dir():
+            for frames_dir in sorted(outputs_dir.glob("**/frames"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if frames_dir.is_dir():
+                    seq_name = frames_dir.parent.name
+                    frames_list = sorted(frames_dir.glob("*.jpg"))
+                    if frames_list:
+                        rel_frames = str(frames_dir.relative_to(ROOT_DIR))
+                        dynamic_frames.append({
+                            "id": rel_frames,
+                            "name": f"📹 视频抽帧序列 [{seq_name}] ({len(frames_list)} 帧)",
+                            "path": rel_frames,
+                            "category": "📹 视频抽帧数据源 (Extracted Video Frames)",
+                            "type": "video",
+                            "frames": len(frames_list),
+                            "description": f"已抽帧图像目录: {rel_frames} ({len(frames_list)} 帧)",
+                        })
+        sequences = dynamic_frames + sequences
+
+        # 3. Static raw dataset sequences
         video_registry = [
-            {
-                "id": "outputs/16_1/frames",
-                "name": "📹 视频 1 (data/16/1.mp4 - 157 帧)",
-                "path": "outputs/16_1/frames",
-                "description": "data/16/1.mp4 抽帧 fps=6, 157 帧",
-            },
-            {
-                "id": "outputs/16_2/frames",
-                "name": "📹 视频 2 (data/16/2.mp4 - 155 帧)",
-                "path": "outputs/16_2/frames",
-                "description": "data/16/2.mp4 抽帧 fps=6, 155 帧",
-            },
-            {
-                "id": "outputs/16_3/frames",
-                "name": "📹 视频 3 (data/16/3.mp4 - 150 帧)",
-                "path": "outputs/16_3/frames",
-                "description": "data/16/3.mp4 抽帧 fps=6, 150 帧",
-            },
             {
                 "id": "data/data/05",
                 "name": "📹 视频流 05 (A-B-C-B-A 循环全景)",
