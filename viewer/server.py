@@ -265,21 +265,23 @@ def generate_orbital_poses(points_xyz: np.ndarray, num_poses: int = 60) -> List[
 _ENGINE: Optional[OnlineReconstructionEngine] = None
 _ENGINE_LOCK = threading.Lock()
 _CURRENT_STREAM_CANCEL = threading.Event()
+_DEVICE: str = "cuda"
 
-def get_engine() -> OnlineReconstructionEngine:
-    global _ENGINE
+def get_engine(device: Optional[str] = None) -> OnlineReconstructionEngine:
+    global _ENGINE, _DEVICE
+    if device is not None:
+        _DEVICE = device
     with _ENGINE_LOCK:
         if _ENGINE is None:
-            print("[Streaming Server] Initializing ABot-Recon Online Reconstruction Engine on GPU...", flush=True)
+            print(f"[Streaming Server] Initializing ABot-Recon Online Reconstruction Engine on {_DEVICE}...", flush=True)
             _ENGINE = OnlineReconstructionEngine(
                 checkpoint=ROOT_DIR / "checkpoints/abot_recon.safetensors",
-                device="cuda",
+                device=_DEVICE,
                 confidence_threshold=0.1,
                 point_stride=4,
             )
             print("[Streaming Server] ABot-Recon Model Loaded Successfully.", flush=True)
         return _ENGINE
-
 
 class StreamingRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -539,7 +541,7 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         status = {
             "status": "ready",
             "model_loaded": _ENGINE is not None,
-            "device": "cuda",
+            "device": _DEVICE,
         }
         self.wfile.write(json.dumps(status).encode("utf-8"))
     def handle_stop_stream(self) -> None:
@@ -868,12 +870,12 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def run_server(port: int = 8088, host: str = "0.0.0.0") -> None:
+def run_server(port: int = 8088, host: str = "0.0.0.0", device: str = "cuda") -> None:
     server_address = (host, port)
     ThreadingHTTPServer.allow_reuse_address = True
 
     # Pre-warm model and compile JIT kernels on GPU
-    engine = get_engine()
+    engine = get_engine(device=device)
     sample_imgs = sorted(Path("examples/images").glob("*.png"))
     if sample_imgs:
         print("[Streaming Server] Pre-warming GPU kernels...", flush=True)
@@ -894,9 +896,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Serve ABot-Recon 3D streaming visualizer")
     parser.add_argument("--port", type=int, default=8088, help="Port to serve on (default: 8088)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host address (default: 0.0.0.0)")
+    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="Device to run on (default: cuda:0)")
     args = parser.parse_args()
-    run_server(port=args.port, host=args.host)
-
+    run_server(port=args.port, host=args.host, device=args.device)
 
 if __name__ == "__main__":
     main()
