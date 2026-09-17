@@ -95,6 +95,33 @@ def format_point_count(count: Optional[int]) -> str:
 
 _SCAN_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
 
+def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
+    """Find matching .npy camera poses / trajectory file for a PLY model, if one exists."""
+    ply_path = ply_path.resolve()
+    parent = ply_path.parent
+    stem = ply_path.stem
+
+    candidates = [
+        parent / f"{stem}_poses.npy",
+        parent / f"{stem}_camera_poses.npy",
+        parent / f"{stem}.poses.npy",
+    ]
+    if "reconstruction" in stem:
+        candidates.extend([
+            parent / "camera_poses.npy",
+            parent / "camera_poses_loop.npy",
+            parent / "camera_poses_noloop.npy",
+        ])
+
+    for c in candidates:
+        if c.is_file():
+            try:
+                rel = c.relative_to(ROOT_DIR)
+                return f"/{rel}"
+            except ValueError:
+                pass
+    return None
+
 def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
     """Scan outputs/ directory dynamically with 3-second cache to prevent redundant disk I/O."""
     global _SCAN_CACHE
@@ -195,6 +222,7 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             "size_bytes": size_bytes,
             "vertex_count": vertex_count,
             "mtime": mtime,
+            "trajectory_url": find_trajectory_for_ply(ply_path),
             "_prio": category_priority.get(category, 50),
         })
 
@@ -284,6 +312,8 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_video_info(parsed_url.query)
         if path == "/api/frame":
             return self.handle_video_frame(parsed_url.query)
+        if path == "/api/trajectory_info":
+            return self.handle_trajectory_info(parsed_url.query)
         if path == "/api/sequences":
             return self.handle_sequences()
         if path in ("/api/offline_models", "/api/models"):
@@ -362,6 +392,24 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(info).encode("utf-8"))
+
+    def handle_trajectory_info(self, query_string: str) -> None:
+        """Return trajectory availability and URL for a given PLY model."""
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        full_path = (ROOT_DIR / model_path_str).resolve()
+
+        traj_url = None
+        if full_path.is_file() and full_path.suffix.lower() == ".ply":
+            traj_url = find_trajectory_for_ply(full_path)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "has_trajectory": traj_url is not None,
+            "trajectory_url": traj_url,
+        }).encode("utf-8"))
 
     def handle_video_frame(self, query_string: str) -> None:
         """Return a single JPEG image frame from colors.pt or raw image sequence."""
