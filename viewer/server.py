@@ -67,159 +67,6 @@ def encode_frame_jpeg_base64(colors_tensor: torch.Tensor, frame_idx: int, qualit
         return None
 
 
-# Curated models registry for rich metadata preservation
-CURATED_MODELS_REGISTRY: Dict[str, Dict[str, str]] = {
-    "outputs/alignment/perfect_corridor_merged.ply": {
-        "name": "🏆 [走廊直道对齐 最佳] 测试走廊 视频1+视频2 统一轴线融合 (23.3万点, 15mm真彩, 推荐)",
-        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
-        "description": "消除两端反向录制坐标系偏航角差异，93.9%重叠率精确对齐同一个书架与显示器 (233,115 点，6.0MB)",
-    },
-    "outputs/alignment/perfect_corridor_colored_merged.ply": {
-        "name": "🎨 [走廊直道对齐 双色检验] 视频1(红) + 视频2(绿) 统一轴线标定 (推荐)",
-        "category": "走廊精准直道融合 (Perfect Corridor Fusion)",
-        "description": "视频1红色、视频2绿色高对比标定，直观检验书架、地面与显示器空间 100% 重叠吻合",
-    },
-    "outputs/alignment/data_05_08_method2_merged.ply": {
-        "name": "🔥 [方案二 多模态] 视频流05-08 正常真彩融合 (341万点, 1.5cm体素去重, 推荐)",
-        "category": "Method 2 Multimodal 05-08",
-        "description": "基于 ALIKED+LightGlue+Umeyama+small_gicp 对视频05-08多视角流式融合 (3,409,327 点，87.8MB)",
-    },
-    "outputs/alignment/data_05_08_method2_colored_merged.ply": {
-        "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分融合 (341万点, 红/绿/蓝/金, 推荐)",
-        "category": "Method 2 Colored 05-08",
-        "description": "每个视频流赋予独立高对比颜色（05红/06绿/07蓝/08金），直观清晰展现各视频点云空间分布",
-    },
-    "outputs/alignment/data_05_08_method2_full_merged.ply": {
-        "name": "🌟 [方案二 多模态] 视频流05-08 正常真彩全量融合 (1401万点超高清点云, 零损失)",
-        "category": "Method 2 Multimodal 05-08",
-        "description": "保留05-08全部 14,014,980 点，无损拼接完整全景走廊与开阔大厅 (361MB)",
-    },
-    "outputs/alignment/data_05_08_method2_colored_full_merged.ply": {
-        "name": "🎨 [方案二 区分色彩] 视频流05-08 四色区分全量融合 (1401万点超高清点云)",
-        "category": "Method 2 Colored 05-08",
-        "description": "1401万点全量四色点云（05红/06绿/07蓝/08金）",
-    },
-    "outputs/data_05_loop/reconstruction.ply": {
-        "name": "📹 视频流 05 - 点云重建 (567万点, A-B-C-B-A 循环全景)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/05 走廊循环视频流 (643 帧)，567万点超高清点云",
-    },
-    "outputs/data_06_loop/reconstruction.ply": {
-        "name": "📹 视频流 06 - 点云重建 (271万点, C-D 右侧视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/06 视频流 (307 帧)，271万点点云",
-    },
-    "outputs/data_07_loop/reconstruction.ply": {
-        "name": "📹 视频流 07 - 点云重建 (344万点, B-D 主干基准视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/07 视频流 (390 帧)，344万点点云 (多视角基准锚点)",
-    },
-    "outputs/data_08_loop/reconstruction.ply": {
-        "name": "📹 视频流 08 - 点云重建 (220万点, C-D 左侧视角)",
-        "category": "05-08 Individual Videos",
-        "description": "data/data/08 视频流 (249 帧)，220万点点云",
-    },
-    "outputs/alignment/method2_lightglue_umeyama_full_merged.ply": {
-        "name": "🔥 [方案二 多模态] 走廊实测 视频1+视频2 全量无损拼接 (LightGlue+Umeyama, 539万点, 推荐)",
-        "category": "Method 2 Multimodal",
-        "description": "基于 ALIKED+LightGlue 视频特征匹配与 Umeyama 求解相似变换融合 (5,389,020 点，78.87% @ 5cm)",
-    },
-    "outputs/alignment/method2_lightglue_umeyama_merged.ply": {
-        "name": "🌟 [方案二 多模态] 走廊实测 视频1+视频2 1.5cm去重融合 (49.3万点)",
-        "category": "Method 2 Multimodal",
-        "description": "1.5cm 体素去重精简版本，适合低配显卡极致流畅交互 (493,129 点，13MB)",
-    },
-    "outputs/alignment/method1_kiss_gicp_full_merged.ply": {
-        "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 全量无损拼接 (KISS-Matcher+GICP, 539万点)",
-        "category": "Method 1 Geometric",
-        "description": "纯 3D 几何特征 Faster-PFH + small_gicp 并行对齐无损拼接 (5,389,020 点，75.85% @ 5cm)",
-    },
-    "outputs/alignment/method1_kiss_gicp_merged.ply": {
-        "name": "📐 [方案一 纯几何] 走廊实测 视频1+视频2 1.5cm去重融合 (46.4万点)",
-        "category": "Method 1 Geometric",
-        "description": "1.5cm 体素去重平滑过渡版本 (463,701 点，12MB)",
-    },
-    "outputs/alignment/merged.ply": {
-        "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 R3PM-Net全量融合 (merged.ply, 539万点)",
-        "category": "R3PM-Net Merged",
-        "description": "基于 R3PM-Net 深度点匹配网络与 Sinkhorn 对应估计对齐 (5,389,020 点，80.8MB)",
-    },
-    "outputs/alignment/mine_r3pm_net_5mm_merged.ply": {
-        "name": "🤖 [方案三 深度学习] 走廊实测 视频1+视频2 5mm去重融合 (276万点)",
-        "category": "R3PM-Net Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,759,565 点，39.5MB)",
-    },
-    "outputs/mine_VID20260903181931_loop/reconstruction.ply": {
-        "name": "📹 自定义视频 1 - 回环优化 (VID181931, 279万点, 走廊实测)",
-        "category": "My Videos",
-        "description": "data/mine 走廊实测视频流 (316 帧)，279万点超高清点云",
-    },
-    "outputs/mine_VID20260903181931_noloop/reconstruction.ply": {
-        "name": "📹 自定义视频 1 - 原始流式 (VID181931, 279万点)",
-        "category": "My Videos",
-        "description": "data/mine 走廊视频 1，纯因果流式预测",
-    },
-    "outputs/mine_VID20260903182041_loop/reconstruction.ply": {
-        "name": "📹 自定义视频 2 - 回环优化 (VID182041, 260万点, 走廊实测)",
-        "category": "My Videos",
-        "description": "data/mine 走廊实测视频流 (295 帧)，260万点超高清点云",
-    },
-    "outputs/mine_VID20260903182041_noloop/reconstruction.ply": {
-        "name": "📹 自定义视频 2 - 原始流式 (VID182041, 260万点)",
-        "category": "My Videos",
-        "description": "data/mine 走廊视频 2，纯因果流式预测",
-    },
-    "outputs/alignment/tum_method2_lightglue_umeyama_full_merged.ply": {
-        "name": "🔥 [TUM 方案二] 360+Desk 100%全量无损拼接 (604万超高清点云, 推荐)",
-        "category": "TUM Merged",
-        "description": "保留全部 333万+270万 原始点云，零点数损失 (6,041,700 点，86MB)",
-    },
-    "outputs/alignment/tum_method1_kiss_gicp_full_merged.ply": {
-        "name": "🔥 [TUM 方案一] 360+Desk 100%全量无损拼接 (604万超高清点云)",
-        "category": "TUM Merged",
-        "description": "纯几何配准全量拼接，零点数损失 (6,041,700 点，86MB)",
-    },
-    "outputs/alignment/tum_method2_lightglue_umeyama_merged.ply": {
-        "name": "🌟 [TUM 方案二] 360+Desk 5mm去重融合 (LightGlue+Umeyama, 222万点)",
-        "category": "TUM Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,217,810 点，31MB)",
-    },
-    "outputs/alignment/tum_method1_kiss_gicp_merged.ply": {
-        "name": "📐 [TUM 方案一] 360+Desk 5mm去重融合 (KISS-Matcher+GICP, 226万点)",
-        "category": "TUM Merged",
-        "description": "5mm 接触面体素去重平滑过渡版本 (2,261,226 点，32MB)",
-    },
-    "outputs/tum_360_loop/reconstruction.ply": {
-        "name": "🔄 TUM 360环绕 - 回环优化 (Loop Closure, 333万点)",
-        "category": "TUM 360",
-        "description": "360度大环绕轨迹对齐，消除闭环双层重影",
-    },
-    "outputs/tum_360_noloop/reconstruction.ply": {
-        "name": "🔄 TUM 360环绕 - 原始流式 (No Loop, 333万点)",
-        "category": "TUM 360",
-        "description": "纯因果单向累加，观察长程旋转下的轨迹与几何漂移",
-    },
-    "outputs/tum_desk_loop/reconstruction.ply": {
-        "name": "🖥️ TUM 办公桌面 - 回环优化 (Loop Closure, 270万点)",
-        "category": "TUM Desk",
-        "description": "电脑显示器/书籍/键盘，回环位姿图平滑对齐",
-    },
-    "outputs/tum_desk_noloop/reconstruction.ply": {
-        "name": "🖥️ TUM 办公桌面 - 原始流式 (No Loop, 270万点)",
-        "category": "TUM Desk",
-        "description": "纯因果单向流式累加",
-    },
-    "outputs/demo_loop/reconstruction.ply": {
-        "name": "🎬 快速演示序列 - 回环优化 (52.9万点)",
-        "category": "Demo",
-        "description": "60 帧快速测试序列",
-    },
-    "outputs/demo_noloop/reconstruction.ply": {
-        "name": "🚀 快速演示序列 - 原始流式 (52.9万点)",
-        "category": "Demo",
-        "description": "60 帧快速测试序列",
-    },
-}
 
 def get_ply_header_info(path: Path) -> Tuple[Optional[int], float]:
     """Quickly read PLY header to extract vertex count and file size in MB."""
@@ -246,36 +93,59 @@ def format_point_count(count: Optional[int]) -> str:
         return f"{count / 10000:.1f}万点"
     return f"{count:,}点"
 
-def scan_all_ply_models() -> List[Dict[str, Any]]:
-    """Scan /home/data/xyz/ABot-Recon/outputs recursively for all .ply point clouds."""
+_SCAN_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+
+def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
+    """Find matching .npy camera poses / trajectory file for a PLY model, if one exists."""
+    ply_path = ply_path.resolve()
+    parent = ply_path.parent
+    stem = ply_path.stem
+
+    candidates = [
+        parent / f"{stem}_poses.npy",
+        parent / f"{stem}_camera_poses.npy",
+        parent / f"{stem}.poses.npy",
+    ]
+    if "reconstruction" in stem:
+        candidates.extend([
+            parent / "camera_poses.npy",
+            parent / "camera_poses_loop.npy",
+            parent / "camera_poses_noloop.npy",
+        ])
+
+    for c in candidates:
+        if c.is_file():
+            try:
+                rel = c.relative_to(ROOT_DIR)
+                return f"/{rel}"
+            except ValueError:
+                pass
+    return None
+
+def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
+    """Scan outputs/ directory dynamically with 3-second cache to prevent redundant disk I/O."""
+    global _SCAN_CACHE
+    now = time.time()
+    if not force and (now - _SCAN_CACHE[0] < 3.0):
+        return _SCAN_CACHE[1]
+
     outputs_dir = ROOT_DIR / "outputs"
     if not outputs_dir.is_dir():
         return []
 
     ply_files = sorted(outputs_dir.glob("**/*.ply"))
     models = []
-
-    category_order = {
-        "走廊精准直道融合 (Perfect Corridor Fusion)": -2,
-        "Method 2 Multimodal 05-08": 0,
-        "Method 2 Colored 05-08": 1,
-        "多视频流场景融合点云 (Multi-Stream Scenes)": 2,
-        "通用多视角融合 (General Fusion)": 3,
-        "Method 2 Multimodal": 4,
-        "Method 1 Geometric": 4,
-        "R3PM-Net Merged": 5,
-        "TUM Merged": 6,
-        "05-08 Individual Videos": 7,
-        "单视频流点云 (Single Video)": 8,
-        "动态滤波对比 (Dynamic Filtering)": 9,
-        "My Videos": 10,
-        "TUM 360": 11,
-        "TUM Desk": 12,
-        "Demo": 13,
-        "实时流式会话点云 (Streaming Sessions)": 14,
-        "回环对比点云 (Loop Comparison)": 15,
-        "配准与多路融合 (Alignment & Fusion)": 16,
-        "Outputs 其他点云 (Other Models)": 17,
+    category_priority = {
+        "🔥 多视角融合点云 (Multi-Stream Fusion)": 0,
+        "📹 单视频重建点云 (Single Video)": 1,
+        "🧹 滤波去噪点云 (Denoised Cleaned)": 2,
+        "🛡️ 动态过滤静态底图 (Filtered Static Map)": 3,
+        "🚶 原始含动态基线 (Baseline with Dynamic)": 4,
+        "📦 仅动态物体 (Removed Dynamic Only)": 5,
+        "🏛️ 场景全景融合 (Scene Fusion)": 6,
+        "📡 实时流式会话 (Streaming Sessions)": 7,
+        "🔄 回环与轨迹对比 (Loop Comparison)": 8,
+        "📁 输出点云 (Outputs Point Clouds)": 9,
     }
 
     for ply_path in ply_files:
@@ -283,79 +153,65 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
         url = f"/{rel_str}"
         vertex_count, size_mb = get_ply_header_info(ply_path)
         size_bytes = ply_path.stat().st_size
+        mtime = ply_path.stat().st_mtime
+        mtime_str = time.strftime("%m-%d %H:%M", time.localtime(mtime))
+        folder_name = ply_path.parent.name
+        stem = ply_path.stem
+        fname = ply_path.name
 
-        if rel_str in CURATED_MODELS_REGISTRY:
-            curated = CURATED_MODELS_REGISTRY[rel_str]
-            name = curated["name"]
-            category = curated["category"]
-            description = curated["description"]
-        else:
-            if rel_str.startswith("outputs/scenes/"):
-                scene_dir = ply_path.parent
-                scene_name = scene_dir.name
-                category = "多视频流场景融合点云 (Multi-Stream Scenes)"
-
-                # Deduplicate: if reconstruction.ply / reconstruction_colored.ply exists,
-                # skip redundant *_normal_merged.ply / *_colored_merged.ply copies
-                if ply_path.name.endswith("_normal_merged.ply") and (scene_dir / "reconstruction.ply").is_file():
-                    continue
-                if ply_path.name.endswith("_colored_merged.ply") and (scene_dir / "reconstruction_colored.ply").is_file():
-                    continue
-
-                is_colored = "colored" in ply_path.name
-                is_full = "full" in ply_path.name
-                if is_colored:
-                    tag = "🎨 [场景区分色彩-全量]" if is_full else "🎨 [场景区分色彩]"
-                else:
-                    tag = "🌟 [场景全景融合-全量]" if is_full else "🏛️ [场景全景融合]"
-                name = f"{tag} {scene_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/alignment/general_fusion/"):
-                category = "通用多视角融合 (General Fusion)"
-                stem = ply_path.stem
-                is_colored = "colored" in stem
-                is_full = "full" in stem
-                tag = "🎨 [多模态区分色彩]" if is_colored else "🔥 [多模态正常真彩]"
-                mode_str = "全量无损" if is_full else "体素去重"
-                name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/alignment/"):
-                category = "配准与多路融合 (Alignment & Fusion)"
-                name = f"📐 [配准融合] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/streams/"):
-                session_name = ply_path.parent.name
-                category = "实时流式会话点云 (Streaming Sessions)"
-                name = f"📡 [流式会话] {session_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif rel_str.startswith("outputs/loop_comparison/"):
-                category = "回环对比点云 (Loop Comparison)"
-                name = f"🔄 [回环对比] {ply_path.stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-            elif ply_path.name.startswith("reconstruction"):
-                seq_dir = ply_path.parent
-                seq_name = seq_dir.name
-                fname = ply_path.name
-
-                # If reconstruction.ply and reconstruction_scheme1_filtered.ply both exist, skip redundant copy
-                if fname == "reconstruction_scheme1_filtered.ply" and (seq_dir / "reconstruction.ply").is_file():
-                    continue
-
-                if fname == "reconstruction_clean.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🧹 [滤波去噪] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_baseline_with_dynamic.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🚶 [原始含动态基线] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_removed_dynamic_only.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"📦 [仅动态物体] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                elif fname == "reconstruction_scheme1_filtered.ply":
-                    category = "动态滤波对比 (Dynamic Filtering)"
-                    name = f"🛡️ [动态过滤] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
-                else:
-                    category = "单视频流点云 (Single Video)"
-                    name = f"📹 [单视频重建] {seq_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+        # 1. Multi-Stream / General Fusion
+        if "fusion" in rel_str or "merged" in stem or "fused_" in stem:
+            category = "🔥 多视角融合点云 (Multi-Stream Fusion)"
+            is_colored = "colored" in stem
+            is_full = "full" in stem
+            tag = "🎨 [区分色彩]" if is_colored else "🌟 [正常真彩]"
+            mode_str = "全量无损" if is_full else "体素去重"
+            if "fused_" in stem:
+                parts = stem.split("_")
+                num_streams = f"{parts[1]}路" if len(parts) > 1 and parts[1].isdigit() else ""
+                name = f"{tag} {num_streams}融合-{mode_str} ({folder_name}/{stem}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
             else:
-                category = "Outputs 其他点云 (Other Models)"
-                name = f"📁 {ply_path.parent.name}/{ply_path.name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB)"
+                name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 2. Dynamic Filtering Contrast
+        elif fname in ("reconstruction_clean.ply", "reconstruction_baseline_with_dynamic.ply", "reconstruction_removed_dynamic_only.ply", "reconstruction_scheme1_filtered.ply") or "dynamic" in fname or "clean" in fname:
+            if "clean" in fname:
+                category = "🧹 滤波去噪点云 (Denoised Cleaned)"
+                tag = "🧹 [滤波去噪]"
+            elif "baseline" in fname:
+                category = "🚶 原始含动态基线 (Baseline with Dynamic)"
+                tag = "🚶 [含动态基线]"
+            elif "removed" in fname or "dynamic_only" in fname:
+                category = "📦 仅动态物体 (Removed Dynamic Only)"
+                tag = "📦 [仅动态物体]"
+            else:
+                category = "🛡️ 动态过滤静态底图 (Filtered Static Map)"
+                tag = "🛡️ [静态过滤]"
+            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 3. Single Video Reconstructions
+        elif fname == "reconstruction.ply" or (ply_path.parent / "metadata.json").is_file():
+            category = "📹 单视频重建点云 (Single Video)"
+            name = f"📹 [单视频重建] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 4. Multi-Stream Scenes
+        elif "scenes" in rel_str:
+            category = "🏛️ 场景全景融合 (Scene Fusion)"
+            is_colored = "colored" in stem
+            tag = "🎨 [场景多色]" if is_colored else "🏛️ [场景全景]"
+            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 5. Streaming Sessions
+        elif "streams" in rel_str:
+            category = "📡 实时流式会话 (Streaming Sessions)"
+            name = f"📡 [流式会话] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 6. Loop Comparison
+        elif "loop" in rel_str:
+            category = "🔄 回环与轨迹对比 (Loop Comparison)"
+            tag = "🔄 [回环优化]" if "loop" in stem else "🚀 [原始流式]"
+            name = f"{tag} {folder_name}/{stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+        # 7. Other Arbitrary Outputs
+        else:
+            category = "📁 输出点云 (Outputs Point Clouds)"
+            name = f"📁 {folder_name}/{fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
 
-            description = f"文件路径: {rel_str} | 大小: {size_mb:.2f}MB" + (f" | 点数: {vertex_count:,}" if vertex_count else "")
+        description = f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 点数: {vertex_count:,} | 时间: {mtime_str}" if vertex_count else f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 时间: {mtime_str}"
 
         models.append({
             "url": url,
@@ -365,18 +221,16 @@ def scan_all_ply_models() -> List[Dict[str, Any]]:
             "description": description,
             "size_bytes": size_bytes,
             "vertex_count": vertex_count,
-            "_order": category_order.get(category, 50),
+            "mtime": mtime,
+            "trajectory_url": find_trajectory_for_ply(ply_path),
+            "_prio": category_priority.get(category, 50),
         })
-    def get_sort_key(m):
-        prio = 1
-        fname = Path(m["path"]).name
-        if fname in ("data_05_08_method2_merged.ply", "data_05_08_method2_colored_merged.ply", "reconstruction.ply"):
-            prio = 0
-        return (m["_order"], prio, m["name"])
 
-    models.sort(key=get_sort_key)
+    # Sort models: Primary key is category priority, Secondary key is mtime descending (newest files on top!)
+    models.sort(key=lambda m: (m["_prio"], -m["mtime"], m["name"]))
     for m in models:
-        m.pop("_order", None)
+        m.pop("_prio", None)
+    _SCAN_CACHE = (now, models)
     return models
 
 def generate_orbital_poses(points_xyz: np.ndarray, num_poses: int = 60) -> List[List[List[float]]]:
@@ -458,6 +312,8 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_video_info(parsed_url.query)
         if path == "/api/frame":
             return self.handle_video_frame(parsed_url.query)
+        if path == "/api/trajectory_info":
+            return self.handle_trajectory_info(parsed_url.query)
         if path == "/api/sequences":
             return self.handle_sequences()
         if path in ("/api/offline_models", "/api/models"):
@@ -537,6 +393,24 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(info).encode("utf-8"))
 
+    def handle_trajectory_info(self, query_string: str) -> None:
+        """Return trajectory availability and URL for a given PLY model."""
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        full_path = (ROOT_DIR / model_path_str).resolve()
+
+        traj_url = None
+        if full_path.is_file() and full_path.suffix.lower() == ".ply":
+            traj_url = find_trajectory_for_ply(full_path)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "has_trajectory": traj_url is not None,
+            "trajectory_url": traj_url,
+        }).encode("utf-8"))
+
     def handle_video_frame(self, query_string: str) -> None:
         """Return a single JPEG image frame from colors.pt or raw image sequence."""
         params = urllib.parse.parse_qs(query_string)
@@ -610,93 +484,47 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 "description": item["description"],
             })
 
-        # 2. Raw video sequences
-        video_registry = [
-            {
-                "id": "data/data/05",
-                "name": "📹 视频流 05 (A-B-C-B-A 循环全景)",
-                "path": "data/data/05",
-                "description": "A狭窄走廊出发走至B右转90°到C，绕书柜转180°回B左转直走回A (643 帧)",
-            },
-            {
-                "id": "data/data/06",
-                "name": "📹 视频流 06 (C-D 右侧视角)",
-                "path": "data/data/06",
-                "description": "从目标区域右侧走过 (镜头朝左) C点到D点 (307 帧)",
-            },
-            {
-                "id": "data/data/07",
-                "name": "📹 视频流 07 (B-D 主干基准视角)",
-                "path": "data/data/07",
-                "description": "与06同路线，摄像头运动基本相同，B点到D点全程 (390 帧)",
-            },
-            {
-                "id": "data/data/08",
-                "name": "📹 视频流 08 (C-D 左侧视角)",
-                "path": "data/data/08",
-                "description": "与06同区域，但从左侧走过 (镜头朝右) C点到D点 (249 帧)",
-            },
-            {
-                "id": "data/mine/VID20260903181931",
-                "name": "📹 用户实拍视频 1 (走廊流式 VID181931)",
-                "path": "data/mine/VID20260903181931",
-                "description": "data/mine 实拍走廊视频 (316 帧)",
-            },
-            {
-                "id": "data/mine/VID20260903182041",
-                "name": "📹 用户实拍视频 2 (走廊流式 VID182041)",
-                "path": "data/mine/VID20260903182041",
-                "description": "data/mine 实拍走廊视频 (295 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
-                "name": "🖥️ TUM 办公桌面全景 (Desk Sequence)",
-                "path": "data/tum/rgbd_dataset_freiburg1_desk/rgb",
-                "description": "办公桌全景、电脑显示器、键盘、书籍 (613 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
-                "name": "📐 TUM 空间平移序列 (XYZ Motion)",
-                "path": "data/tum/rgbd_dataset_freiburg1_xyz/rgb",
-                "description": "沿 X/Y/Z 三轴典型平移扫描 (798 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_360/rgb",
-                "name": "🔄 TUM 360度环绕回环 (360 Loop)",
-                "path": "data/tum/rgbd_dataset_freiburg1_360/rgb",
-                "description": "绕桌面 360 度环绕拍摄，经典回环场景 (756 帧)",
-            },
-            {
-                "id": "data/tum/rgbd_dataset_freiburg1_room/rgb",
-                "name": "🏢 TUM 完整大房间场景 (Full Room)",
-                "path": "data/tum/rgbd_dataset_freiburg1_room/rgb",
-                "description": "完整办公室大场景、多张桌椅、黑板 (1362 帧)",
-            },
-            {
-                "id": "examples/images",
-                "name": "🎬 快速演示序列 (Demo Sample)",
-                "path": "examples/images",
-                "description": "TUM 办公桌局部平移 (60 帧快速体验)",
-            },
-        ]
+        # 2. Dynamically scan outputs/**/frames for any extracted video frames
+        outputs_dir = ROOT_DIR / "outputs"
+        dynamic_frames = []
+        if outputs_dir.is_dir():
+            for frames_dir in sorted(outputs_dir.glob("**/frames"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if frames_dir.is_dir():
+                    seq_name = frames_dir.parent.name
+                    frames_list = sorted(frames_dir.glob("*.jpg"))
+                    if frames_list:
+                        rel_frames = str(frames_dir.relative_to(ROOT_DIR))
+                        dynamic_frames.append({
+                            "id": rel_frames,
+                            "name": f"📹 视频抽帧序列 [{seq_name}] ({len(frames_list)} 帧)",
+                            "path": rel_frames,
+                            "category": "📹 视频抽帧数据源 (Extracted Video Frames)",
+                            "type": "video",
+                            "frames": len(frames_list),
+                            "description": f"已抽帧图像目录: {rel_frames} ({len(frames_list)} 帧)",
+                        })
+        sequences = dynamic_frames + sequences
 
-        for item in video_registry:
-            seq_dir = ROOT_DIR / item["path"]
-            if seq_dir.is_dir():
-                frames = len([
-                    p for p in seq_dir.iterdir()
-                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
-                ])
-                if frames > 0:
-                    sequences.append({
-                        "id": item["id"],
-                        "name": f"{item['name']} - {frames} 帧",
-                        "path": item["path"],
-                        "category": "📹 原始视频流序列 (GPU 深度在线推理建图)",
-                        "type": "video",
-                        "frames": frames,
-                        "description": item["description"],
-                    })
+        # 3. Dynamically scan data/ and examples/ for any raw image sequence folders
+        scan_dirs = [ROOT_DIR / "data", ROOT_DIR / "examples"]
+        for base_dir in scan_dirs:
+            if not base_dir.is_dir():
+                continue
+            for d in sorted(base_dir.glob("**"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if d.is_dir() and "frames" not in d.parts:
+                    imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}]
+                    if len(imgs) >= 10:
+                        rel_path = str(d.relative_to(ROOT_DIR))
+                        if not any(s.get("path") == rel_path for s in sequences):
+                            sequences.append({
+                                "id": rel_path,
+                                "name": f"📹 原始图像序列 [{d.parent.name}/{d.name}] ({len(imgs)} 帧)",
+                                "path": rel_path,
+                                "category": "📹 原始图像序列 (GPU 在线推理建图)",
+                                "type": "video",
+                                "frames": len(imgs),
+                                "description": f"图像序列: {rel_path} ({len(imgs)} 帧)",
+                            })
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

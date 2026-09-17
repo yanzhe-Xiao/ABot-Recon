@@ -759,9 +759,9 @@ def main() -> None:
         help=(
             "Selectable output deliverables (comma-separated or 'all'):\n"
             "  normal         : 1.5cm voxel deduplicated true-color PLY\n"
-            "  normal_full    : 100% full-resolution true-color PLY\n"
+            "  normal_full    : 100%% full-resolution true-color PLY\n"
             "  colored        : Distinct-color segmented PLY (unique color per stream)\n"
-            "  colored_full   : Distinct-color full-resolution PLY\n"
+            "  colored_full   : Distinct-color 100%% full-resolution PLY\n"
             "  aligned        : Separate aligned point clouds for each stream (<id>_aligned.ply)\n"
             "  transforms     : JSON file with all Sim(3) transforms, scales, and matrices\n"
             "  report         : Markdown evaluation report with registration metrics\n"

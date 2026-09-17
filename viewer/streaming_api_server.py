@@ -641,6 +641,207 @@ class MultiSessionReconstructionManager:
         print(f"[Finalize] Session [{session_id}] finalized in {time.time() - t0:.2f}s! ({dedup_count:,} points) Scene [{scene_id}] updated.")
         return summary
 
+    def _optimize_directory_sync(
+        self,
+        target_dir: Path,
+        voxel_size: float = 0.015,
+        mls_iterations: int = 3,
+    ) -> Dict[str, Any]:
+        """
+        Synchronous helper to run PostFusionOptimizer (optv2) on target_dir.
+        Applies global PGO, ground plane leveling, bilateral surface thinning,
+        submap-aware color correction, and dual-stage outlier removal (SOR+ROR).
+        Updates standard reconstruction.ply, reconstruction_colored.ply, and transforms.json.
+        """
+        from scripts.optimize_fused_pointcloud import PostFusionOptimizer
+
+        opt_dir = target_dir / "optimized"
+        optimizer = PostFusionOptimizer(
+            voxel_size=voxel_size,
+            mls_iterations=mls_iterations,
+            enable_submap_icp=True,
+            enable_plane_leveling=True,
+            enable_surface_thinning=True,
+            enable_color_harmonization=True,
+            enable_sor=True,
+        )
+        report = optimizer.optimize_fusion_directory(
+            fusion_dir=target_dir,
+            output_dir=opt_dir,
+        )
+
+        opt_normal = opt_dir / "fused_optimized_normal_merged.ply"
+        opt_colored = opt_dir / "fused_optimized_colored_merged.ply"
+        opt_transforms = opt_dir / "transforms.json"
+
+        std_reconstruction = target_dir / "reconstruction.ply"
+        std_colored = target_dir / "reconstruction_colored.ply"
+        std_transforms = target_dir / "transforms.json"
+
+        if opt_normal.is_file():
+            shutil.copyfile(opt_normal, std_reconstruction)
+        if opt_colored.is_file():
+            shutil.copyfile(opt_colored, std_colored)
+        if opt_transforms.is_file():
+            shutil.copyfile(opt_transforms, std_transforms)
+
+        return report
+
+    def _fuse_incremental_to_scene_sync(
+        self,
+        scene_dir: Path,
+        scene_id: str,
+        existing_sids: List[str],
+        new_sids: List[str],
+        voxel_size: float = 0.015,
+    ) -> Dict[str, Any]:
+        """
+        Incrementally registers new video streams directly against an already-optimized scene.
+        1. Matches new_sid against existing sessions via Method 2 keyframe retrieval + LightGlue + Umeyama.
+        2. Chains the new transform through the existing session's already-optimized transform in transforms.json.
+        3. Refines new_sid's points directly against the optimized scene reconstruction.ply via small_gicp VGICP.
+        4. Updates transforms.json with the new sessions.
+        5. Runs PostFusionOptimizer (optv2) to thin seams and harmonize colors across the new combination.
+        """
+        transforms_file = scene_dir / "transforms.json"
+        if not transforms_file.is_file():
+            raise FileNotFoundError(f"Missing transforms.json in {scene_dir} for incremental fusion.")
+
+        meta = json.loads(transforms_file.read_text(encoding="utf-8"))
+        seq_dict = meta.get("sequences", {})
+        anchor_id = meta.get("anchor_sequence", existing_sids[0])
+
+        scene_ply = scene_dir / "reconstruction.ply"
+        if not scene_ply.is_file():
+            raise FileNotFoundError(f"Missing optimized reconstruction.ply in {scene_dir}")
+        scene_pcd = o3d.io.read_point_cloud(str(scene_ply))
+        scene_down = scene_pcd.voxel_down_sample(voxel_size)
+        scene_down_pts = np.asarray(scene_down.points, dtype=np.float64)
+
+        from scripts.match_and_fuse_method2 import Method2FusionPipeline, generate_distinct_palette, MatchEdge
+        import small_gicp
+
+        pipeline = Method2FusionPipeline(
+            device=str(self.device),
+            merge_voxel_size=voxel_size,
+        )
+
+        all_sids = existing_sids + new_sids
+        recon_dirs = [self.output_base_dir / sid for sid in all_sids]
+        items = pipeline.load_sequence_items(recon_dirs)
+
+        palette_colors = generate_distinct_palette(len(all_sids))
+        palette = {sid: palette_colors[i] for i, sid in enumerate(all_sids)}
+
+        for new_sid in new_sids:
+            item_new = items.get(new_sid)
+            if item_new is None:
+                raise ValueError(f"Could not load sequence items for {new_sid}")
+
+            best_edge = None
+            best_score = -1.0
+            best_ex_sid = None
+
+            for ex_sid in existing_sids:
+                item_ex = items.get(ex_sid)
+                if item_ex is None:
+                    continue
+                edge = pipeline.match_pair(item_new, item_ex)
+                if edge is not None and edge.inliers >= 6 and edge.score > best_score:
+                    best_score = edge.score
+                    best_edge = edge
+                    best_ex_sid = ex_sid
+
+            if best_edge is None or best_ex_sid is None:
+                for ex_sid in existing_sids:
+                    item_ex = items.get(ex_sid)
+                    if item_ex is None:
+                        continue
+                    edge_rev = pipeline.match_pair(item_ex, item_new)
+                    if edge_rev is not None and edge_rev.inliers >= 6 and edge_rev.score > best_score:
+                        inv_scale = 1.0 / edge_rev.scale
+                        inv_T = np.linalg.inv(edge_rev.T_fine)
+                        best_score = edge_rev.score
+                        best_ex_sid = ex_sid
+                        best_edge = MatchEdge(
+                            src=new_sid,
+                            tgt=ex_sid,
+                            scale=inv_scale,
+                            R=inv_T[:3, :3],
+                            t=inv_T[:3, 3],
+                            T_fine=inv_T,
+                            inliers=edge_rev.inliers,
+                            inlier_ratio=edge_rev.inlier_ratio,
+                            rmse=edge_rev.rmse,
+                            score=edge_rev.score,
+                        )
+
+            if best_edge is None or best_ex_sid is None:
+                raise RuntimeError(
+                    f"Incremental fusion failed: new session [{new_sid}] could not find overlapping "
+                    f"keyframes with existing scene sessions {existing_sids}."
+                )
+
+            print(
+                f"[Incremental Fusion] Matched new stream [{new_sid}] -> existing [{best_ex_sid}] "
+                f"({best_edge.inliers} inliers, scale={best_edge.scale:.4f}, RMSE={best_edge.rmse*1000:.1f}mm)"
+            )
+
+            ex_info = seq_dict[best_ex_sid]
+            ex_scale = float(ex_info.get("scale_to_anchor", 1.0))
+            ex_T = np.array(ex_info.get("transform_matrix", np.eye(4)), dtype=np.float64)
+
+            chained_scale = ex_scale * best_edge.scale
+            T_scaled = best_edge.T_fine.copy()
+            T_scaled[:3, 3] *= ex_scale
+            chained_T = ex_T @ T_scaled
+
+            # Fine registration directly against the OPTIMIZED scene point cloud using VGICP
+            pts_init = (np.asarray(item_new.pcd_down.points, dtype=np.float64) * chained_scale) @ chained_T[:3, :3].T + chained_T[:3, 3]
+            gicp_res = small_gicp.align(
+                target_points=scene_down_pts,
+                source_points=pts_init,
+                init_T_target_source=np.eye(4, dtype=np.float64),
+                registration_type="VGICP",
+                voxel_resolution=0.08,
+                downsampling_resolution=voxel_size,
+                max_correspondence_distance=0.08,
+                max_iterations=40,
+                num_threads=8,
+            )
+            final_T = gicp_res.T_target_source @ chained_T
+            final_scale = chained_scale
+
+            seq_dict[new_sid] = {
+                "raw_points": len(item_new.pcd_raw.points),
+                "scale_to_anchor": round(float(final_scale), 6),
+                "color_rgb": palette[new_sid],
+                "transform_matrix": final_T.tolist(),
+                "ply_path": str(self.output_base_dir / new_sid / "reconstruction.ply"),
+                "dir_path": str(self.output_base_dir / new_sid),
+            }
+            existing_sids.append(new_sid)
+
+        meta["sequences"] = seq_dict
+        meta["total_raw_points"] = sum(s.get("raw_points", 0) for s in seq_dict.values())
+        with open(transforms_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+
+        print(f"[Incremental Fusion] Running optv2 post-fusion optimization on updated scene [{scene_id}]...")
+        opt_report = self._optimize_directory_sync(
+            target_dir=scene_dir,
+            voxel_size=voxel_size,
+            mls_iterations=3,
+        )
+
+        return {
+            "status": "incremental_fused_optimized",
+            "new_sessions": new_sids,
+            "all_sessions": all_sids,
+            "anchor": anchor_id,
+            "optimization_report": opt_report,
+        }
+
     async def fuse_scene(
         self,
         scene_id: str,
@@ -707,6 +908,70 @@ class MultiSessionReconstructionManager:
             }
 
         # Case 2: 2 or more completed sessions for this scene -> Method 2 Multimodal Fusion
+        # Check if this scene already has an optimized fusion and can be incrementally expanded
+        std_reconstruction = scene_dir / "reconstruction.ply"
+        std_transforms = scene_dir / "transforms.json"
+
+        if std_transforms.is_file() and std_reconstruction.is_file():
+            try:
+                prev_meta = json.loads(std_transforms.read_text(encoding="utf-8"))
+                prev_sids = [s for s in prev_meta.get("sequences", {}).keys() if s in valid_sids]
+                new_sids = [s for s in valid_sids if s not in prev_sids]
+
+                if len(prev_sids) >= 1 and len(new_sids) > 0:
+                    print(f"\n[Scene Incremental Fusion] Scene [{scene_id}] already has {len(prev_sids)} stream(s): {prev_sids}.")
+                    print(f"  Fusing {len(new_sids)} new stream(s) directly against the optimized scene point cloud: {new_sids}...")
+                    meta["fusion_status"] = "fusing_incremental"
+                    self.save_scene_metadata(scene_id, meta)
+
+                    async with self.gpu_lock:
+                        loop = asyncio.get_event_loop()
+                        inc_res = await loop.run_in_executor(
+                            None,
+                            lambda: self._fuse_incremental_to_scene_sync(
+                                scene_dir=scene_dir,
+                                scene_id=scene_id,
+                                existing_sids=list(prev_sids),
+                                new_sids=list(new_sids),
+                                voxel_size=voxel_size,
+                            ),
+                        )
+
+                    pcd = o3d.io.read_point_cloud(str(std_reconstruction))
+                    pt_count = len(pcd.points)
+                    size_mb = round(std_reconstruction.stat().st_size / 1024 / 1024, 2)
+
+                    meta["fusion_status"] = "fused"
+                    meta["is_fused"] = True
+                    meta["total_points"] = pt_count
+                    meta["anchor_session"] = prev_meta.get("anchor_sequence", prev_sids[0])
+                    meta["models"] = {
+                        "reconstruction_ply": f"/api/scenes/{scene_id}/reconstruction.ply",
+                        "reconstruction_colored_ply": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true",
+                        "transforms_json": f"/api/scenes/{scene_id}/transforms.json",
+                        "ply_size_mb": size_mb,
+                    }
+                    meta["optimization_report"] = inc_res.get("optimization_report")
+                    self.save_scene_metadata(scene_id, meta)
+
+                    return {
+                        "status": "fused",
+                        "mode": "incremental_optimized",
+                        "scene_id": scene_id,
+                        "message": f"Successfully incrementally fused {len(new_sids)} new video stream(s) into optimized scene '{scene_id}'!",
+                        "sessions": valid_sids,
+                        "anchor_session": meta["anchor_session"],
+                        "total_points": pt_count,
+                        "ply_size_mb": size_mb,
+                        "download_url": f"/api/scenes/{scene_id}/reconstruction.ply",
+                        "download_colored_url": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true",
+                        "transforms_url": f"/api/scenes/{scene_id}/transforms.json",
+                        "fusion_details": inc_res,
+                    }
+            except Exception as e:
+                print(f"[Incremental Fusion Notice] Incremental fusion failed ({e}); falling back to full fusion...")
+
+        # Case 2: Full Method 2 Multimodal Fusion across all streams
         print(f"\n[Scene Fusion] Fusing {len(valid_sids)} streams for scene [{scene_id}]: {valid_sids}...")
         meta["fusion_status"] = "fusing"
         self.save_scene_metadata(scene_id, meta)
@@ -754,6 +1019,23 @@ class MultiSessionReconstructionManager:
         if transforms_file.is_file():
             shutil.copyfile(transforms_file, std_transforms)
 
+        # Automatic Post-Fusion Optimization (optv2)
+        print(f"\n[Scene Post-Fusion Optimization] Running optv2 on scene [{scene_id}]...")
+        opt_report = None
+        try:
+            async with self.gpu_lock:
+                loop = asyncio.get_event_loop()
+                opt_report = await loop.run_in_executor(
+                    None,
+                    lambda: self._optimize_directory_sync(
+                        target_dir=scene_dir,
+                        voxel_size=voxel_size,
+                        mls_iterations=3,
+                    ),
+                )
+        except Exception as e:
+            print(f"[Scene Optimization Notice] optv2 optimization failed ({e}), kept unoptimized fusion.")
+
         pcd = o3d.io.read_point_cloud(str(std_reconstruction))
         pt_count = len(pcd.points)
         size_mb = round(std_reconstruction.stat().st_size / 1024 / 1024, 2)
@@ -768,12 +1050,14 @@ class MultiSessionReconstructionManager:
             "transforms_json": f"/api/scenes/{scene_id}/transforms.json",
             "ply_size_mb": size_mb,
         }
+        if opt_report:
+            meta["optimization_report"] = opt_report
         self.save_scene_metadata(scene_id, meta)
 
         return {
             "status": "fused",
             "scene_id": scene_id,
-            "message": f"Successfully fused {len(valid_sids)} video streams for scene '{scene_id}'!",
+            "message": f"Successfully fused and optv2-optimized {len(valid_sids)} video streams for scene '{scene_id}'!",
             "sessions": valid_sids,
             "anchor_session": meta["anchor_session"],
             "total_points": pt_count,
@@ -782,6 +1066,7 @@ class MultiSessionReconstructionManager:
             "download_colored_url": f"/api/scenes/{scene_id}/reconstruction.ply?colored=true",
             "transforms_url": f"/api/scenes/{scene_id}/transforms.json",
             "fusion_details": result,
+            "optimization_report": opt_report,
         }
     async def fuse_sessions(
         self,
@@ -825,6 +1110,23 @@ class MultiSessionReconstructionManager:
                 )
             result = await loop.run_in_executor(None, _run)
 
+
+        # Automatically run optv2 post-fusion optimization on stream fusions as well
+        print(f"\n[Server Fusion Optimization] Running optv2 on {fusion_out_dir}...")
+        try:
+            async with self.gpu_lock:
+                loop = asyncio.get_event_loop()
+                opt_report = await loop.run_in_executor(
+                    None,
+                    lambda: self._optimize_directory_sync(
+                        target_dir=fusion_out_dir,
+                        voxel_size=voxel_size,
+                        mls_iterations=3,
+                    ),
+                )
+            result["optimization_report"] = opt_report
+        except Exception as e:
+            print(f"[Server Fusion Optimization Notice] optv2 optimization failed ({e}).")
         return result
 
 
