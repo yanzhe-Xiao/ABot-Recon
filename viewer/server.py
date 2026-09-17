@@ -155,7 +155,10 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
         size_bytes = ply_path.stat().st_size
         mtime = ply_path.stat().st_mtime
         mtime_str = time.strftime("%m-%d %H:%M", time.localtime(mtime))
-        folder_name = ply_path.parent.name
+        try:
+            rel_dir = str(ply_path.parent.relative_to(ROOT_DIR))
+        except ValueError:
+            rel_dir = str(ply_path.parent.name)
         stem = ply_path.stem
         fname = ply_path.name
 
@@ -169,7 +172,7 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             if "fused_" in stem:
                 parts = stem.split("_")
                 num_streams = f"{parts[1]}路" if len(parts) > 1 and parts[1].isdigit() else ""
-                name = f"{tag} {num_streams}融合-{mode_str} ({folder_name}/{stem}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+                name = f"{tag} {num_streams}融合-{mode_str} ({fname}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
             else:
                 name = f"{tag} {stem} ({mode_str}, {format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 2. Dynamic Filtering Contrast
@@ -186,36 +189,37 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             else:
                 category = "🛡️ 动态过滤静态底图 (Filtered Static Map)"
                 tag = "🛡️ [静态过滤]"
-            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+            name = f"{tag} {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 3. Single Video Reconstructions
         elif fname == "reconstruction.ply" or (ply_path.parent / "metadata.json").is_file():
             category = "📹 单视频重建点云 (Single Video)"
-            name = f"📹 [单视频重建] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+            name = f"📹 [单视频重建] {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 4. Multi-Stream Scenes
         elif "scenes" in rel_str:
             category = "🏛️ 场景全景融合 (Scene Fusion)"
             is_colored = "colored" in stem
             tag = "🎨 [场景多色]" if is_colored else "🏛️ [场景全景]"
-            name = f"{tag} {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+            name = f"{tag} {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 5. Streaming Sessions
         elif "streams" in rel_str:
             category = "📡 实时流式会话 (Streaming Sessions)"
-            name = f"📡 [流式会话] {folder_name} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+            name = f"📡 [流式会话] {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 6. Loop Comparison
         elif "loop" in rel_str:
             category = "🔄 回环与轨迹对比 (Loop Comparison)"
             tag = "🔄 [回环优化]" if "loop" in stem else "🚀 [原始流式]"
-            name = f"{tag} {folder_name}/{stem} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
+            name = f"{tag} {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         # 7. Other Arbitrary Outputs
         else:
             category = "📁 输出点云 (Outputs Point Clouds)"
-            name = f"📁 {folder_name}/{fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
-
+            name = f"📁 {fname} ({format_point_count(vertex_count)}, {size_mb:.1f}MB, {mtime_str})"
         description = f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 点数: {vertex_count:,} | 时间: {mtime_str}" if vertex_count else f"路径: {rel_str} | 大小: {size_mb:.2f}MB | 时间: {mtime_str}"
 
         models.append({
             "url": url,
             "path": rel_str,
+            "rel_dir": rel_dir,
+            "filename": fname,
             "name": name,
             "category": category,
             "description": description,
@@ -226,8 +230,8 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             "_prio": category_priority.get(category, 50),
         })
 
-    # Sort models: Primary key is category priority, Secondary key is mtime descending (newest files on top!)
-    models.sort(key=lambda m: (m["_prio"], -m["mtime"], m["name"]))
+    # Sort models: Primary key is category priority, Secondary is rel_dir (folder group), Tertiary is mtime descending
+    models.sort(key=lambda m: (m["_prio"], m["rel_dir"], -m["mtime"], m["name"]))
     for m in models:
         m.pop("_prio", None)
     _SCAN_CACHE = (now, models)
@@ -304,10 +308,20 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
 
-        if path in ("/", "/index.html", "/viewer"):
-            self.path = "/viewer/index.html"
-            return super().do_GET()
-
+        if path in ("/", "/index.html", "/viewer", "/viewer/index.html"):
+            index_path = ROOT_DIR / "viewer" / "index.html"
+            if index_path.is_file():
+                with open(index_path, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.end_headers()
+                self.wfile.write(content)
+                return
         if path == "/api/stream":
             return self.handle_sse_stream(parsed_url.query)
         if path == "/api/video_info":
@@ -481,6 +495,7 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 "name": f"📁 [outputs 点云流] {item['name']}",
                 "path": item["path"],
                 "category": "📁 outputs 结果点云 (.ply 实时流式建图/回放)",
+                "rel_dir": item.get("rel_dir", ""),
                 "type": "ply",
                 "frames": 60,
                 "description": item["description"],
@@ -501,6 +516,7 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                             "name": f"📹 视频抽帧序列 [{seq_name}] ({len(frames_list)} 帧)",
                             "path": rel_frames,
                             "category": "📹 视频抽帧数据源 (Extracted Video Frames)",
+                            "rel_dir": str(frames_dir.parent.relative_to(ROOT_DIR)),
                             "type": "video",
                             "frames": len(frames_list),
                             "description": f"已抽帧图像目录: {rel_frames} ({len(frames_list)} 帧)",
@@ -523,6 +539,7 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                                 "name": f"📹 原始图像序列 [{d.parent.name}/{d.name}] ({len(imgs)} 帧)",
                                 "path": rel_path,
                                 "category": "📹 原始图像序列 (GPU 在线推理建图)",
+                                "rel_dir": str(d.parent.relative_to(ROOT_DIR)),
                                 "type": "video",
                                 "frames": len(imgs),
                                 "description": f"图像序列: {rel_path} ({len(imgs)} 帧)",

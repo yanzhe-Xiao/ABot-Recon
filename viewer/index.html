@@ -187,6 +187,27 @@
       color: #fff;
     }
 
+    select optgroup {
+      font-weight: 700;
+      color: #60a5fa;
+      background: #0f172a;
+      padding: 6px 4px;
+      font-style: normal;
+    }
+
+    select option.select-folder-header {
+      font-weight: 600;
+      color: #fbbf24 !important;
+      background: #1e293b !important;
+      padding-left: 8px;
+    }
+
+    select option.select-file-item {
+      color: #f1f5f9;
+      background: #1e293b;
+      padding-left: 18px;
+    }
+
     input[type="range"] {
       width: 100%;
       height: 5px;
@@ -473,6 +494,13 @@
         <select id="model-select">
           <option value="" disabled selected>-- 请选择点云模型 (outputs/) --</option>
         </select>
+        <div id="model-selected-badge" style="display:none; margin-top:4px; padding:6px 10px; border-radius:6px; background:rgba(30,41,59,0.7); border:1px solid rgba(59,130,246,0.25); font-size:11px; line-height:1.4;">
+          <div style="display:flex; align-items:center; gap:5px; color:#60a5fa; font-family:monospace; word-break:break-all;">
+            <span>📂</span>
+            <span id="model-selected-path-text"></span>
+          </div>
+          <div id="model-selected-meta-text" style="color:#94a3b8; font-size:11px; margin-top:2px;"></div>
+        </div>
       </div>
       <div class="control-group">
         <input type="file" id="file-input" accept=".ply">
@@ -1263,7 +1291,9 @@
 
     async function loadPLYFromUrl(url) {
       stopLiveStream();
-      showToast(`正在加载 ${url.split('/').slice(-2, -1)[0]} 点云...`);
+      const modelName = url.split('/').pop() || '点云';
+      const dirName = url.split('/').slice(-3, -1).join('/') || '';
+      showToast(`正在加载 [${dirName}/${modelName}]...`);
       try {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -1409,6 +1439,7 @@
             for (let opt of modelSel.options) {
               if (opt.value === url) {
                 modelSel.value = url;
+                if (typeof updateSelectedModelPathBadge === 'function') updateSelectedModelPathBadge();
                 break;
               }
             }
@@ -1420,6 +1451,7 @@
 
 
     document.getElementById('model-select').addEventListener('change', (e) => {
+      if (typeof updateSelectedModelPathBadge === 'function') updateSelectedModelPathBadge();
       if (e.target.value) {
         loadPLYFromUrl(e.target.value);
       }
@@ -1506,20 +1538,53 @@
           if (seqs && seqs.length > 0) {
             const sel = document.getElementById('stream-sequence-select');
             sel.innerHTML = '';
-            const groups = {};
+
+            // Group sequences by category -> then by rel_dir (folder path)
+            const categoryMap = new Map();
             seqs.forEach(item => {
               const cat = item.category || '其它数据源';
-              if (!groups[cat]) {
-                const grp = document.createElement('optgroup');
-                grp.label = cat;
-                groups[cat] = grp;
-                sel.appendChild(grp);
+              if (!categoryMap.has(cat)) {
+                categoryMap.set(cat, new Map());
               }
-              const opt = document.createElement('option');
-              opt.value = item.id;
-              opt.innerText = item.name;
-              if (item.type) opt.dataset.type = item.type;
-              groups[cat].appendChild(opt);
+              const folderMap = categoryMap.get(cat);
+              let folder = item.rel_dir;
+              if (!folder) {
+                const p = item.path || item.id || '';
+                const lastSlash = p.lastIndexOf('/');
+                folder = lastSlash >= 0 ? p.slice(0, lastSlash) : p;
+              }
+              if (!folderMap.has(folder)) {
+                folderMap.set(folder, []);
+              }
+              folderMap.get(folder).push(item);
+            });
+
+            categoryMap.forEach((folderMap, cat) => {
+              const grp = document.createElement('optgroup');
+              grp.label = cat;
+
+              folderMap.forEach((items, folderPath) => {
+                const folderOpt = document.createElement('option');
+                folderOpt.value = '';
+                folderOpt.disabled = true;
+                folderOpt.className = 'select-folder-header';
+                folderOpt.innerText = `📁 ${folderPath}/`;
+                grp.appendChild(folderOpt);
+
+                items.forEach((item, idx) => {
+                  const isLast = idx === items.length - 1;
+                  const branch = isLast ? '   └── ' : '   ├── ';
+                  const opt = document.createElement('option');
+                  opt.className = 'select-file-item';
+                  opt.value = item.id;
+                  opt.innerText = `${branch}${item.name}`;
+                  opt.title = `${item.path}\n${item.description || ''}`;
+                  if (item.type) opt.dataset.type = item.type;
+                  grp.appendChild(opt);
+                });
+              });
+
+              sel.appendChild(grp);
             });
             updateStreamButtonLabel();
           }
@@ -1543,6 +1608,22 @@
       toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 3500);
     }
 
+    function updateSelectedModelPathBadge() {
+      const sel = document.getElementById('model-select');
+      const badge = document.getElementById('model-selected-badge');
+      const pathText = document.getElementById('model-selected-path-text');
+      const metaText = document.getElementById('model-selected-meta-text');
+      if (!sel || !badge) return;
+      const selectedOpt = sel.options[sel.selectedIndex];
+      if (selectedOpt && selectedOpt.value && selectedOpt.dataset.path) {
+        badge.style.display = 'block';
+        pathText.innerText = selectedOpt.dataset.path;
+        metaText.innerText = selectedOpt.dataset.desc || '';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+
     function populateModelSelect(models, isInitialLoad) {
       if (!models || models.length === 0) return;
       const sel = document.getElementById('model-select');
@@ -1556,22 +1637,59 @@
       defaultPlaceholder.innerText = `-- 请选择点云模型 (共 ${models.length} 个) --`;
       sel.appendChild(defaultPlaceholder);
 
-      const groups = {};
+      // Group models: category -> rel_dir -> models list
+      const categoryMap = new Map();
       models.forEach(m => {
         const cat = m.category || '全部点云模型';
-        if (!groups[cat]) {
-          const grp = document.createElement('optgroup');
-          grp.label = cat;
-          groups[cat] = grp;
-          sel.appendChild(grp);
+        if (!categoryMap.has(cat)) {
+          categoryMap.set(cat, new Map());
         }
-        const opt = document.createElement('option');
-        opt.value = m.url;
-        opt.innerText = m.name;
-        if (m.trajectory_url) {
-          opt.dataset.trajectory = m.trajectory_url;
+        const folderMap = categoryMap.get(cat);
+        let folder = m.rel_dir;
+        if (!folder) {
+          const p = m.path || '';
+          const lastSlash = p.lastIndexOf('/');
+          folder = lastSlash >= 0 ? p.slice(0, lastSlash) : 'outputs';
         }
-        groups[cat].appendChild(opt);
+        if (!folderMap.has(folder)) {
+          folderMap.set(folder, []);
+        }
+        folderMap.get(folder).push(m);
+      });
+
+      categoryMap.forEach((folderMap, cat) => {
+        const grp = document.createElement('optgroup');
+        grp.label = cat;
+
+        folderMap.forEach((items, folderPath) => {
+          // Folder separator option (disabled, styled like folder header)
+          const folderOpt = document.createElement('option');
+          folderOpt.value = '';
+          folderOpt.disabled = true;
+          folderOpt.className = 'select-folder-header';
+          folderOpt.innerText = `📁 ${folderPath}/`;
+          grp.appendChild(folderOpt);
+
+          // Files inside this folder with tree-branch indentation
+          items.forEach((m, idx) => {
+            const isLast = idx === items.length - 1;
+            const branch = isLast ? '   └── ' : '   ├── ';
+            const opt = document.createElement('option');
+            opt.className = 'select-file-item';
+            opt.value = m.url;
+            opt.innerText = `${branch}${m.name}`;
+            opt.title = `${m.path}\n${m.description || ''}`;
+            opt.dataset.path = m.path;
+            opt.dataset.dir = folderPath;
+            opt.dataset.desc = m.description || '';
+            if (m.trajectory_url) {
+              opt.dataset.trajectory = m.trajectory_url;
+            }
+            grp.appendChild(opt);
+          });
+        });
+
+        sel.appendChild(grp);
       });
 
       let foundCurrent = false;
@@ -1589,6 +1707,8 @@
         defaultPlaceholder.selected = true;
         sel.value = '';
       }
+
+      updateSelectedModelPathBadge();
     }
 
     async function refreshOfflineModels(isInitialLoad = false, isUserClick = false) {
