@@ -172,10 +172,10 @@ class MultiSessionReconstructionManager:
         device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
         output_base_dir: Path = REPO_ROOT / "outputs/streams",
         scenes_base_dir: Path = REPO_ROOT / "outputs/scenes",
-        dynamic_filter: bool = False,
-        dynamic_model: str = "yolo11n-seg.pt",
-        dynamic_conf: float = 0.15,
-        dynamic_dilate: int = 7,
+        dynamic_filter: bool = True,
+        dynamic_model: str = "yolo11m-seg.pt",
+        dynamic_conf: float = 0.12,
+        dynamic_dilate: int = 15,
     ):
         self.device = torch.device(device)
         self.output_base_dir = output_base_dir
@@ -269,6 +269,10 @@ class MultiSessionReconstructionManager:
                     elif d.name.startswith(f"{scene_id}-") or d.name.startswith(f"{scene_id}_") or d.name == scene_id:
                         completed.add(d.name)
         meta["completed_sessions"] = sorted(list(completed))
+        # Dynamic sync: keep active_sessions aligned with live in-memory sessions
+        live_active = [sid for sid, s in self.sessions.items() if s.scene_id == scene_id]
+        merged_active = set(live_active) | set(meta.get("active_sessions", []))
+        meta["active_sessions"] = sorted(list(merged_active - set(meta["completed_sessions"])))
         return meta
 
     def save_scene_metadata(self, scene_id: str, meta: Dict[str, Any]) -> None:
@@ -289,6 +293,7 @@ class MultiSessionReconstructionManager:
         scene_id: str,
         voxel_size: float = 0.015,
         debounce_seconds: float = 0.5,
+        force_full: bool = False,
     ) -> Dict[str, Any]:
         """Thread-safe and async-safe scene fusion coalescer for concurrent/simultaneous EOS."""
         if scene_id not in self.scene_locks:
@@ -303,13 +308,13 @@ class MultiSessionReconstructionManager:
                     # Already updated by earlier fusion pass
                     return self.get_scene_metadata(scene_id)
                 self.scene_dirty[scene_id] = False
-                return await self.fuse_scene(scene_id, voxel_size=voxel_size)
+                return await self.fuse_scene(scene_id, voxel_size=voxel_size, force_full=force_full)
 
         async with scene_lock:
             if debounce_seconds > 0:
                 await asyncio.sleep(debounce_seconds)
             self.scene_dirty[scene_id] = False
-            return await self.fuse_scene(scene_id, voxel_size=voxel_size)
+            return await self.fuse_scene(scene_id, voxel_size=voxel_size, force_full=force_full)
 
     def get_or_create_session(
         self,
@@ -567,10 +572,14 @@ class MultiSessionReconstructionManager:
                 dedup_count = raw_count
 
             ply_path = session_dir / "reconstruction.ply"
-            o3d.io.write_point_cloud(str(ply_path), final_pcd)
+            if len(final_pcd.points) > 0:
+                o3d.io.write_point_cloud(str(ply_path), final_pcd)
+            else:
+                with open(ply_path, "w", encoding="ascii") as f:
+                    f.write("ply\nformat ascii 1.0\nelement vertex 0\nproperty float x\nproperty float y\nproperty float z\nend_header\n")
             deliverables["ply_path"] = str(ply_path)
             deliverables["ply_url"] = f"/api/streams/{session_id}/reconstruction.ply"
-            deliverables["ply_size_mb"] = round(ply_path.stat().st_size / 1024 / 1024, 2)
+            deliverables["ply_size_mb"] = round(ply_path.stat().st_size / 1024 / 1024, 2) if ply_path.is_file() else 0.0
 
         # 2. Save Trajectory
         if session.save_trajectory and len(session.history_poses) > 0:
@@ -579,19 +588,41 @@ class MultiSessionReconstructionManager:
             np.save(pose_path, poses_np)
             deliverables["trajectory_path"] = str(pose_path)
 
-        # 3. Update Scene Association & Trigger Coalesced Fusion
+        # 3. Update Scene Association & Barrier Tracking
         scene_id = session.scene_id
+        # Eject from active in-memory session roster
+        self.sessions.pop(session_id, None)
+
+        now = time.time()
+        idle_timeout_seconds = 30.0
+        remaining_active: List[str] = []
+        stale_to_drop: List[str] = []
+
+        for sid, s in list(self.sessions.items()):
+            if s.scene_id == scene_id:
+                if (now - s.last_active) <= idle_timeout_seconds:
+                    remaining_active.append(sid)
+                else:
+                    stale_to_drop.append(sid)
+
+        for stale_sid in stale_to_drop:
+            print(f"[Session Watchdog] Session [{stale_sid}] idle for >{idle_timeout_seconds:.1f}s. Evicting from active barrier...")
+            self.sessions.pop(stale_sid, None)
+
         async with self.meta_lock:
             scene_meta = self.get_scene_metadata(scene_id)
             if session_id in scene_meta["active_sessions"]:
                 scene_meta["active_sessions"].remove(session_id)
+            for stale_sid in stale_to_drop:
+                if stale_sid in scene_meta["active_sessions"]:
+                    scene_meta["active_sessions"].remove(stale_sid)
             # Track the unique folder_name so multiple streams or scenes never collide
             if session.folder_name not in scene_meta["completed_sessions"]:
                 scene_meta["completed_sessions"].append(session.folder_name)
             if session_id in scene_meta["completed_sessions"]:
                 scene_meta["completed_sessions"].remove(session_id)
+            scene_meta["active_sessions"] = sorted(remaining_active)
             self.save_scene_metadata(scene_id, scene_meta)
-
         # 4. Save Summary JSON (written before scene fusion so disk discovery finds it)
         elapsed = time.time() - session.created_at
         summary = {
@@ -616,16 +647,34 @@ class MultiSessionReconstructionManager:
         with open(session_dir / "session_summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
 
-        # 5. Trigger Coalesced Fusion
+        # 5. Barrier Coalescing (Option 1):
+        # Only trigger global fusion when ALL streams in this scene have completed!
         scene_fusion_res: Optional[Dict[str, Any]] = None
-        if session.auto_fuse:
-            try:
-                # Coalesce simultaneous endings into a single unified fusion pass
-                scene_fusion_res = await self.schedule_scene_fusion(scene_id, voxel_size=session.voxel_size, debounce_seconds=0.5)
-            except Exception as e:
-                print(f"[Scene Auto-Fusion Notice] Auto-fusion for scene [{scene_id}] deferred/failed: {e}")
-                scene_fusion_res = {"status": "auto_fuse_failed", "error": str(e)}
-
+        if len(remaining_active) > 0:
+            print(
+                f"\n[Scene Barrier] Session [{session_id}] finalized, but scene [{scene_id}] "
+                f"still has {len(remaining_active)} active stream(s) in progress: {remaining_active}. "
+                f"Deferring global fusion until all active streams complete."
+            )
+            scene_fusion_res = {
+                "status": "deferred_barrier",
+                "scene_id": scene_id,
+                "message": f"Session completed. Waiting for {len(remaining_active)} other stream(s) to complete before full fusion: {remaining_active}",
+                "waiting_for": remaining_active,
+            }
+        else:
+            print(
+                f"\n[Scene Barrier Cleared] All video streams for scene [{scene_id}] have completed! "
+                f"Triggering unified full-scene fusion and optv2 optimization..."
+            )
+            if session.auto_fuse:
+                try:
+                    scene_fusion_res = await self.schedule_scene_fusion(
+                        scene_id, voxel_size=session.voxel_size, debounce_seconds=1.0
+                    )
+                except Exception as e:
+                    print(f"[Scene Auto-Fusion Notice] Auto-fusion for scene [{scene_id}] deferred/failed: {e}")
+                    scene_fusion_res = {"status": "auto_fuse_failed", "error": str(e)}
         summary["scene_fusion"] = scene_fusion_res
         with open(session_dir / "session_summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
@@ -827,19 +876,11 @@ class MultiSessionReconstructionManager:
         with open(transforms_file, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
-        print(f"[Incremental Fusion] Running optv2 post-fusion optimization on updated scene [{scene_id}]...")
-        opt_report = self._optimize_directory_sync(
-            target_dir=scene_dir,
-            voxel_size=voxel_size,
-            mls_iterations=3,
-        )
-
         return {
-            "status": "incremental_fused_optimized",
+            "status": "incremental_aligned",
             "new_sessions": new_sids,
             "all_sessions": all_sids,
             "anchor": anchor_id,
-            "optimization_report": opt_report,
         }
 
     async def fuse_scene(
@@ -848,6 +889,7 @@ class MultiSessionReconstructionManager:
         voxel_size: float = 0.015,
         anchor: Optional[str] = None,
         outputs: str = "normal,colored,transforms",
+        force_full: bool = False,
     ) -> Dict[str, Any]:
         """Fuse all completed streaming sessions belonging to scene_id."""
         scene_dir = self.scenes_base_dir / scene_id
@@ -912,7 +954,7 @@ class MultiSessionReconstructionManager:
         std_reconstruction = scene_dir / "reconstruction.ply"
         std_transforms = scene_dir / "transforms.json"
 
-        if std_transforms.is_file() and std_reconstruction.is_file():
+        if not force_full and std_transforms.is_file() and std_reconstruction.is_file():
             try:
                 prev_meta = json.loads(std_transforms.read_text(encoding="utf-8"))
                 prev_sids = [s for s in prev_meta.get("sequences", {}).keys() if s in valid_sids]
@@ -936,6 +978,22 @@ class MultiSessionReconstructionManager:
                                 voxel_size=voxel_size,
                             ),
                         )
+
+                    # Run optv2 optimization outside gpu_lock so GPU inference stays unblocked
+                    print(f"[Incremental Fusion] Running optv2 post-fusion optimization on updated scene [{scene_id}]...")
+                    try:
+                        loop = asyncio.get_event_loop()
+                        opt_report = await loop.run_in_executor(
+                            None,
+                            lambda: self._optimize_directory_sync(
+                                target_dir=scene_dir,
+                                voxel_size=voxel_size,
+                                mls_iterations=3,
+                            ),
+                        )
+                        inc_res["optimization_report"] = opt_report
+                    except Exception as oe:
+                        print(f"[Incremental Fusion Notice] optv2 optimization notice: {oe}")
 
                     pcd = o3d.io.read_point_cloud(str(std_reconstruction))
                     pt_count = len(pcd.points)
@@ -1023,16 +1081,15 @@ class MultiSessionReconstructionManager:
         print(f"\n[Scene Post-Fusion Optimization] Running optv2 on scene [{scene_id}]...")
         opt_report = None
         try:
-            async with self.gpu_lock:
-                loop = asyncio.get_event_loop()
-                opt_report = await loop.run_in_executor(
-                    None,
-                    lambda: self._optimize_directory_sync(
-                        target_dir=scene_dir,
-                        voxel_size=voxel_size,
-                        mls_iterations=3,
-                    ),
-                )
+            loop = asyncio.get_event_loop()
+            opt_report = await loop.run_in_executor(
+                None,
+                lambda: self._optimize_directory_sync(
+                    target_dir=scene_dir,
+                    voxel_size=voxel_size,
+                    mls_iterations=3,
+                ),
+            )
         except Exception as e:
             print(f"[Scene Optimization Notice] optv2 optimization failed ({e}), kept unoptimized fusion.")
 
@@ -1114,16 +1171,15 @@ class MultiSessionReconstructionManager:
         # Automatically run optv2 post-fusion optimization on stream fusions as well
         print(f"\n[Server Fusion Optimization] Running optv2 on {fusion_out_dir}...")
         try:
-            async with self.gpu_lock:
-                loop = asyncio.get_event_loop()
-                opt_report = await loop.run_in_executor(
-                    None,
-                    lambda: self._optimize_directory_sync(
-                        target_dir=fusion_out_dir,
-                        voxel_size=voxel_size,
-                        mls_iterations=3,
-                    ),
-                )
+            loop = asyncio.get_event_loop()
+            opt_report = await loop.run_in_executor(
+                None,
+                lambda: self._optimize_directory_sync(
+                    target_dir=fusion_out_dir,
+                    voxel_size=voxel_size,
+                    mls_iterations=3,
+                ),
+            )
             result["optimization_report"] = opt_report
         except Exception as e:
             print(f"[Server Fusion Optimization Notice] optv2 optimization failed ({e}).")
@@ -1583,11 +1639,12 @@ async def trigger_scene_fusion(
     scene_id: str,
     voxel_size: float = Query(0.015, description="Spatial voxel size in meters for de-duplication"),
     anchor: Optional[str] = Query(None, description="Anchor stream session ID (default: auto)"),
+    force_full: bool = Query(True, description="Force full joint fusion across all streams instead of incremental"),
 ):
     """Explicitly trigger or re-run multi-stream multimodal fusion across all streams in this scene."""
     manager = get_manager()
     try:
-        res = await manager.fuse_scene(scene_id=scene_id, voxel_size=voxel_size, anchor=anchor)
+        res = await manager.fuse_scene(scene_id=scene_id, voxel_size=voxel_size, anchor=anchor, force_full=force_full)
         return res
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1610,12 +1667,12 @@ def main() -> None:
     parser.add_argument(
         "--dynamic-filter",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Enable real-time 2D dynamic object removal (YOLO-seg) by default",
     )
-    parser.add_argument("--dynamic-model", type=str, default="yolo11n-seg.pt", help="YOLO segmentation model")
-    parser.add_argument("--dynamic-conf", type=float, default=0.15, help="Confidence threshold for dynamic object detection")
-    parser.add_argument("--dynamic-dilate", type=int, default=7, help="Dilation kernel size in pixels")
+    parser.add_argument("--dynamic-model", type=str, default="yolo11m-seg.pt", help="YOLO segmentation model")
+    parser.add_argument("--dynamic-conf", type=float, default=0.12, help="Confidence threshold for dynamic object detection")
+    parser.add_argument("--dynamic-dilate", type=int, default=15, help="Dilation kernel size in pixels")
     args = parser.parse_args()
 
     # Pre-init manager

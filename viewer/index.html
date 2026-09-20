@@ -419,6 +419,123 @@
   <!-- 侧边交互控制器 -->
   <div class="control-panel">
     
+    <!-- 视频上传全流程 3D 建图与全局优化模块 (8090 同源流水线) -->
+    <div class="panel-section" style="border: 1px solid rgba(59, 130, 246, 0.4); padding: 12px; border-radius: 10px; background: rgba(59, 130, 246, 0.05);">
+      <div class="section-title" style="color:#60a5fa; border-color:rgba(59,130,246,0.25); display:flex; justify-content:space-between; align-items:center;">
+        <span>🎬 视频上传 3D 重建</span>
+        <span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(59,130,246,0.2); color:#93c5fd; font-weight:normal;">含 optv2 优化</span>
+      </div>
+
+      <!-- 文件拖拽/选择框 -->
+      <div class="control-group">
+        <div id="video-drop-zone" style="border: 2px dashed rgba(59,130,246,0.4); border-radius: 8px; padding: 12px 8px; text-align: center; cursor: pointer; transition: all 0.2s; background: rgba(15,23,42,0.45);">
+          <div style="font-size: 22px; margin-bottom: 2px;">📹</div>
+          <div style="font-size: 12px; color: #93c5fd; font-weight: 500;" id="video-file-label">点击或拖拽上传本地视频文件</div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">支持 MP4, AVI, MOV, MKV</div>
+          <input type="file" id="video-file-input" accept="video/*,.mp4,.avi,.mov,.mkv" style="display: none;">
+        </div>
+        <div id="video-file-info" style="display:none; margin-top:6px; padding:6px 10px; border-radius:6px; background:rgba(30,41,59,0.8); border:1px solid rgba(59,130,246,0.3); font-size:11px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span id="video-file-name" style="color:#60a5fa; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px;"></span>
+            <span id="video-file-size" style="color:#94a3b8;"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 场景名称输入与已有场景联想 -->
+      <div class="control-group" style="margin-top:6px;">
+        <div class="control-row">
+          <label style="font-size:12px; color:var(--text-muted);">🏛️ 场景名称 (Scene ID)</label>
+          <span style="font-size:10px; color:#38bdf8;" title="指定相同场景名称会自动触发多视角拼接与全局优化">多流拼接 ℹ️</span>
+        </div>
+        <input type="text" id="video-scene-id" list="existing-scenes-list" placeholder="如: conference_room, lab_hall" style="width:100%; background:rgba(255,255,255,0.06); border:1px solid var(--panel-border); border-radius:6px; color:var(--text-main); padding:6px 10px; font-size:12px; margin-top:4px;">
+        <datalist id="existing-scenes-list"></datalist>
+      </div>
+
+      <!-- 点云密度与体素滤波参数 (默认 0.003m，可人为输入调节) -->
+      <div class="control-group" style="margin-top:6px;">
+        <div class="control-row">
+          <label for="video-voxel-size" style="font-size:11px; color:var(--text-muted);">点云去重体素大小 (Voxel Size)</label>
+          <span class="val" id="video-voxel-val" style="color:#60a5fa; font-size:11px; font-weight:600;">0.003 m (3.0 mm)</span>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; margin-top:2px;">
+          <input type="range" id="video-voxel-range" min="0.001" max="0.030" step="0.001" value="0.003" style="flex:1;" title="拖动滑动条调节体素网格">
+          <input type="number" id="video-voxel-size" min="0" max="0.5" step="0.001" value="0.003" style="width:74px; background:rgba(255,255,255,0.06); border:1px solid var(--panel-border); border-radius:4px; color:#60a5fa; font-size:11px; text-align:center; padding:3px 4px; font-weight:600;" title="直接输入体素数值 (单位: 米)">
+        </div>
+        <div style="font-size:10px; color:var(--text-muted); margin-top:2px; display:flex; justify-content:space-between;">
+          <span>极细 0.001</span>
+          <span style="color:#60a5fa;">默认 0.003 (推荐)</span>
+          <span>稀疏 0.030</span>
+        </div>
+      </div>
+
+      <div class="control-group" style="margin-top:6px;">
+        <div class="control-row">
+          <label style="font-size:11px; color:var(--text-muted);">空间点云密度 (Stride)</label>
+          <label style="font-size:11px; color:var(--text-muted);">时间抽帧步长 (Stride)</label>
+        </div>
+        <div class="btn-group">
+          <select id="video-point-stride" style="font-size:11px; padding:4px 6px;">
+            <option value="2" selected>Stride 2 (高清推荐)</option>
+            <option value="1">Stride 1 (极限致密)</option>
+            <option value="4">Stride 4 (快速预览)</option>
+          </select>
+          <select id="video-frame-stride" style="font-size:11px; padding:4px 6px;">
+            <option value="1" selected>逐帧计算 (1x)</option>
+            <option value="2">隔帧抽样 (2x加速)</option>
+            <option value="3">隔2帧抽样 (3x加速)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 自动优化开关 -->
+      <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px; padding:6px 8px; background:rgba(255,255,255,0.02); border-radius:6px; border:1px solid rgba(255,255,255,0.05);">
+        <label class="checkbox-row" style="font-size:11px;">
+          <input type="checkbox" id="chk-video-auto-fuse" checked>
+          <span>多视频自动拼接与 optv2 全局优化 (PGO+MLS)</span>
+        </label>
+        <label class="checkbox-row" style="font-size:11px;">
+          <input type="checkbox" id="chk-video-dynamic-filter">
+          <span>开启动态物体滤除 (YOLO 移除行人车辆)</span>
+        </label>
+      </div>
+
+      <!-- 启动建图按钮 -->
+      <div class="control-group" style="margin-top:8px;">
+        <button class="btn-stream" id="btn-video-upload-start" style="background:linear-gradient(135deg, #2563eb, #1d4ed8); border-color:#3b82f6;">
+          🚀 开始上传并执行全自动 3D 建图
+        </button>
+      </div>
+
+      <!-- 实时进度条与状态显示 -->
+      <div id="video-progress-box" style="display:none; margin-top:8px;">
+        <div class="control-row">
+          <span style="font-size:11px; color:#93c5fd;" id="video-progress-stage">准备中...</span>
+          <span class="val" id="video-progress-pct" style="color:#60a5fa;">0%</span>
+        </div>
+        <div class="progress-bar-container" style="height:6px; margin-top:4px;">
+          <div class="progress-bar-fill" id="video-progress-bar" style="width:0%; background:linear-gradient(90deg, #3b82f6, #60a5fa, #10b981);"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px; font-size:10px; color:var(--text-muted);">
+          <span id="video-progress-details">等待处理...</span>
+          <span id="video-progress-fps">0.0 FPS</span>
+        </div>
+      </div>
+
+      <!-- 完成结果交付卡片 -->
+      <div id="video-result-box" style="display:none; margin-top:8px; padding:10px; border-radius:8px; background:rgba(16,185,129,0.1); border:1px solid rgba(16,185,129,0.3);">
+        <div style="color:#34d399; font-weight:600; font-size:12px; display:flex; align-items:center; gap:4px;">
+          <span>✅</span>
+          <span id="video-result-title">3D 建图与优化全部完成！</span>
+        </div>
+        <div id="video-result-stats" style="font-size:11px; color:#e2e8f0; margin-top:4px; line-height:1.4;"></div>
+        <div style="display:flex; gap:6px; margin-top:8px;">
+          <button id="btn-video-view-model" style="flex:1; padding:5px 8px; border-radius:5px; background:#059669; border:none; color:#fff; font-size:11px; cursor:pointer; font-weight:500;">👁️ 3D 视图查看</button>
+          <a id="btn-video-download-ply" href="#" download style="padding:5px 8px; border-radius:5px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); color:#e2e8f0; font-size:11px; text-decoration:none; text-align:center; display:inline-block;">⬇️ 下载 PLY</a>
+        </div>
+      </div>
+    </div>
+
     <!-- 实时流式建图模块 -->
     <div class="panel-section" style="border: 1px solid rgba(239, 68, 68, 0.3); padding: 12px; border-radius: 10px; background: rgba(239, 68, 68, 0.05);">
       <div class="section-title" style="color:#f87171; border-color:rgba(239,68,68,0.2);">
@@ -1528,6 +1645,307 @@
       }
     }
 
+    // =========================================================================
+    // 视频上传与全自动 3D 建图处理控制器 (Video Upload Reconstruction Controller)
+    // =========================================================================
+    let selectedVideoFile = null;
+    let currentUploadEventSource = null;
+
+    async function loadExistingScenes() {
+      try {
+        const resp = await fetch('/api/scenes');
+        if (!resp.ok) return;
+        const scenes = await resp.json();
+        const datalist = document.getElementById('existing-scenes-list');
+        if (!datalist) return;
+        datalist.innerHTML = '';
+        scenes.forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.scene_id;
+          opt.label = `${s.scene_id} (${s.streams ? s.streams.length : 0}个流${s.is_fused ? ', 已优化' : ''})`;
+          datalist.appendChild(opt);
+        });
+      } catch (e) {
+        console.warn('Failed to load scenes list:', e);
+      }
+    }
+
+    function initVideoUploadController() {
+      const dropZone = document.getElementById('video-drop-zone');
+      const fileInput = document.getElementById('video-file-input');
+      const fileInfo = document.getElementById('video-file-info');
+      const fileNameSpan = document.getElementById('video-file-name');
+      const fileSizeSpan = document.getElementById('video-file-size');
+      const sceneInput = document.getElementById('video-scene-id');
+      const btnStart = document.getElementById('btn-video-upload-start');
+      const progressBox = document.getElementById('video-progress-box');
+      const progressBar = document.getElementById('video-progress-bar');
+      const progressStage = document.getElementById('video-progress-stage');
+      const progressPct = document.getElementById('video-progress-pct');
+      const progressDetails = document.getElementById('video-progress-details');
+      const progressFps = document.getElementById('video-progress-fps');
+      const resultBox = document.getElementById('video-result-box');
+      const resultStats = document.getElementById('video-result-stats');
+      const btnViewModel = document.getElementById('btn-video-view-model');
+      const btnDownloadPly = document.getElementById('btn-video-download-ply');
+
+      if (!dropZone || !fileInput || !btnStart) return;
+
+      loadExistingScenes();
+      // Voxel Size Slider & Input two-way binding
+      const voxelRange = document.getElementById('video-voxel-range');
+      const voxelInput = document.getElementById('video-voxel-size');
+      const voxelVal = document.getElementById('video-voxel-val');
+
+      if (voxelRange && voxelInput && voxelVal) {
+        function updateVoxelDisplay(val) {
+          const num = parseFloat(val) || 0.003;
+          voxelVal.innerText = `${num.toFixed(3)} m (${(num * 1000).toFixed(1)} mm)`;
+        }
+        voxelRange.addEventListener('input', (e) => {
+          voxelInput.value = e.target.value;
+          updateVoxelDisplay(e.target.value);
+        });
+        voxelInput.addEventListener('input', (e) => {
+          voxelRange.value = e.target.value;
+          updateVoxelDisplay(e.target.value);
+        });
+      }
+
+      dropZone.addEventListener('click', () => fileInput.click());
+
+      ['dragenter', 'dragover'].forEach(eventName => {
+        dropZone.addEventListener(eventName, (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dropZone.style.borderColor = '#60a5fa';
+          dropZone.style.background = 'rgba(59,130,246,0.15)';
+        }, false);
+      });
+      ['dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dropZone.style.borderColor = 'rgba(59,130,246,0.4)';
+          dropZone.style.background = 'rgba(15,23,42,0.45)';
+        }, false);
+      });
+
+      dropZone.addEventListener('drop', (e) => {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        if (files && files.length > 0) {
+          handleSelectedVideo(files[0]);
+        }
+      });
+
+      fileInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          handleSelectedVideo(e.target.files[0]);
+        }
+      });
+
+      function handleSelectedVideo(file) {
+        selectedVideoFile = file;
+        const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+        fileNameSpan.innerText = file.name;
+        fileNameSpan.title = file.name;
+        fileSizeSpan.innerText = `${sizeMb} MB`;
+        fileInfo.style.display = 'block';
+
+        if (!sceneInput.value.trim()) {
+          const rawStem = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+          sceneInput.value = rawStem;
+        }
+      }
+
+      btnStart.addEventListener('click', async () => {
+        if (!selectedVideoFile) {
+          showToast('⚠️ 请先选择或拖拽上传视频文件');
+          dropZone.click();
+          return;
+        }
+
+        const sceneId = sceneInput.value.trim() || selectedVideoFile.name.replace(/\.[^/.]+$/, '');
+        const pointStride = document.getElementById('video-point-stride').value;
+        const frameStride = document.getElementById('video-frame-stride').value;
+        const voxelSize = document.getElementById('video-voxel-size') ? document.getElementById('video-voxel-size').value : '0.003';
+        const autoFuse = document.getElementById('chk-video-auto-fuse').checked;
+        const dynamicFilter = document.getElementById('chk-video-dynamic-filter').checked;
+        btnStart.disabled = true;
+        btnStart.style.opacity = '0.6';
+        btnStart.innerText = '⏳ 正在上传视频并初始化...';
+        progressBox.style.display = 'block';
+        resultBox.style.display = 'none';
+        progressBar.style.width = '2%';
+        progressPct.innerText = '2%';
+        progressStage.innerText = '正在上传视频文件到 8088 服务...';
+        progressDetails.innerText = `文件: ${selectedVideoFile.name}`;
+        progressFps.innerText = '0.0 FPS';
+
+        const formData = new FormData();
+        formData.append('video', selectedVideoFile);
+        formData.append('scene_id', sceneId);
+        formData.append('point_stride', pointStride);
+        formData.append('frame_stride', frameStride);
+        formData.append('voxel_size', voxelSize);
+        formData.append('auto_fuse', autoFuse ? 'true' : 'false');
+        formData.append('dynamic_filter', dynamicFilter ? 'true' : 'false');
+        try {
+          const uploadResp = await fetch('/api/video/upload', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!uploadResp.ok) {
+            const errData = await uploadResp.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${uploadResp.status}`);
+          }
+
+          const initData = await uploadResp.json();
+          const taskId = initData.task_id;
+          progressStage.innerText = '视频已就绪，正在启动 3D 神经推理建图...';
+          progressBar.style.width = '8%';
+          progressPct.innerText = '8%';
+
+          listenTaskProgress(taskId, sceneId);
+        } catch (err) {
+          console.error('Video upload failed:', err);
+          showToast(`❌ 上传失败: ${err.message}`);
+          btnStart.disabled = false;
+          btnStart.style.opacity = '1';
+          btnStart.innerText = '🚀 开始上传并执行全自动 3D 建图';
+          progressStage.innerText = `错误: ${err.message}`;
+          progressStage.style.color = '#ef4444';
+        }
+      });
+
+      function listenTaskProgress(taskId, sceneId) {
+        if (currentUploadEventSource) {
+          currentUploadEventSource.close();
+        }
+
+        let isCompleted = false;
+        const pollInterval = setInterval(async () => {
+          if (isCompleted) {
+            clearInterval(pollInterval);
+            return;
+          }
+          try {
+            const resp = await fetch(`/api/video/status?task_id=${encodeURIComponent(taskId)}`);
+            if (resp.ok) {
+              const data = await resp.json();
+              updateProgressUI(data);
+              if (data.status === 'completed' || data.status === 'failed') {
+                clearInterval(pollInterval);
+                onTaskSettled(data, sceneId);
+              }
+            }
+          } catch (e) {}
+        }, 800);
+
+        try {
+          const es = new EventSource(`/api/video/progress?task_id=${encodeURIComponent(taskId)}`);
+          currentUploadEventSource = es;
+
+          es.addEventListener('progress', (e) => {
+            const data = JSON.parse(e.data);
+            updateProgressUI(data);
+          });
+
+          es.addEventListener('complete', (e) => {
+            isCompleted = true;
+            es.close();
+            clearInterval(pollInterval);
+            const data = JSON.parse(e.data);
+            onTaskSettled(data, sceneId);
+          });
+
+          es.addEventListener('error', () => {
+            es.close();
+          });
+        } catch (e) {}
+      }
+
+      function updateProgressUI(data) {
+        if (!data) return;
+        const pct = Math.max(0, Math.min(100, data.progress || 0));
+        progressBar.style.width = `${pct}%`;
+        progressPct.innerText = `${pct.toFixed(0)}%`;
+
+        if (data.message) {
+          progressStage.innerText = data.message;
+        }
+
+        if (data.current_frame && data.effective_frames) {
+          progressDetails.innerText = `帧号: ${data.current_frame} / ${data.effective_frames}`;
+        } else if (data.status === 'finalizing') {
+          progressDetails.innerText = '体素去重与资产存盘中...';
+        }
+
+        if (data.fps) {
+          progressFps.innerText = `${data.fps} FPS`;
+        }
+      }
+
+      async function onTaskSettled(data, sceneId) {
+        btnStart.disabled = false;
+        btnStart.style.opacity = '1';
+        btnStart.innerText = '🚀 开始上传并执行全自动 3D 建图';
+
+        if (data.status === 'failed') {
+          progressStage.innerText = `❌ 建图失败: ${data.error || '未知错误'}`;
+          progressStage.style.color = '#ef4444';
+          showToast(`❌ 3D 建图失败: ${data.error || '未知错误'}`);
+          return;
+        }
+
+        progressStage.innerText = '🎉 3D 建图与全景优化已全部完成！';
+        progressStage.style.color = '#34d399';
+        progressBar.style.width = '100%';
+        progressPct.innerText = '100%';
+
+        const result = data.result || {};
+        const dedupCount = (data.dedup_point_count || result.dedup_point_count || 0).toLocaleString();
+        const duration = (result.duration_seconds || 0).toFixed(1);
+        const folderName = data.folder_name || result.folder_name || '';
+
+        resultStats.innerHTML = `
+          <div>🏛️ 场景: <b>${data.scene_id || sceneId}</b></div>
+          <div>✨ 有效点数: <b>${dedupCount}</b> 点 | 耗时: <b>${duration}s</b></div>
+          <div style="color:#94a3b8; font-size:10px; margin-top:2px;">📁 资产目录: ${folderName}</div>
+        `;
+
+        const viewerUrl = data.viewer_url || `/outputs/scenes/${data.scene_id || sceneId}/reconstruction.ply`;
+
+        btnDownloadPly.href = viewerUrl.startsWith('/') ? viewerUrl : '/' + viewerUrl;
+        btnDownloadPly.setAttribute('download', `${data.scene_id || sceneId}_reconstruction.ply`);
+
+        btnViewModel.onclick = () => {
+          loadPLYFromUrl(viewerUrl);
+          showToast(`👁️ 已加载场景 [${data.scene_id || sceneId}] 三维点云`);
+        };
+
+        resultBox.style.display = 'block';
+        showToast(`🎉 场景 [${data.scene_id || sceneId}] 3D 建图完成，共 ${dedupCount} 点！`);
+
+        await refreshOfflineModels(false, false);
+        loadExistingScenes();
+
+        const modelSel = document.getElementById('model-select');
+        if (modelSel) {
+          for (let opt of modelSel.options) {
+            if (opt.value === viewerUrl || opt.dataset.path === viewerUrl || (data.scene_id && opt.value.includes(data.scene_id))) {
+              modelSel.value = opt.value;
+              updateSelectedModelPathBadge();
+              loadPLYFromUrl(opt.value);
+              break;
+            }
+          }
+        }
+      }
+    }
+
     function startApp() {
       initScene();
       animate(performance.now());
@@ -1592,6 +2010,7 @@
         .catch(err => console.warn("Failed to load sequences list:", err));
 
       refreshOfflineModels(true, false);
+      initVideoUploadController();
     }
 
     function showToast(msg) {

@@ -144,8 +144,12 @@ def ransac_umeyama(
     estimate_scale: bool = True,
     iters: int = 3000,
     thresh: float = 0.06,
+    min_scale: float = 0.5,
+    max_scale: float = 2.0,
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, float] | None:
     """RANSAC wrapper around closed-form Umeyama solver."""
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
     n = len(src)
     if n < 4:
         return None
@@ -156,7 +160,7 @@ def ransac_umeyama(
         idx = np.random.choice(n, 4, replace=False)
         try:
             s, R, t = umeyama_svd(src[idx], dst[idx], estimate_scale=estimate_scale)
-            if estimate_scale and (s < 0.2 or s > 5.0):
+            if estimate_scale and (s < min_scale or s > max_scale):
                 continue
             pred = s * (src @ R.T) + t
             err = np.linalg.norm(dst - pred, axis=1)
@@ -166,9 +170,10 @@ def ransac_umeyama(
                 best_model = (s, R, t)
         except Exception:
             continue
-
     if len(best_inliers) >= 4 and best_model is not None:
         s, R, t = umeyama_svd(src[best_inliers], dst[best_inliers], estimate_scale=estimate_scale)
+        if estimate_scale and (s < min_scale or s > max_scale):
+            return None
         pred = s * (src[best_inliers] @ R.T) + t
         rmse = float(np.sqrt(np.mean(np.sum((dst[best_inliers] - pred)**2, axis=1))))
         return s, R, t, best_inliers, rmse

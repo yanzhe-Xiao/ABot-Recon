@@ -9,6 +9,12 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
+import email.parser
+import asyncio
+import subprocess
+import shutil
+import websockets
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -287,6 +293,314 @@ def get_engine(device: Optional[str] = None) -> OnlineReconstructionEngine:
             print("[Streaming Server] ABot-Recon Model Loaded Successfully.", flush=True)
         return _ENGINE
 
+# ---------------------------------------------------------------------------
+# Video Reconstruction Task Management & 8090 Streaming Bridge
+# ---------------------------------------------------------------------------
+_VIDEO_TASKS: Dict[str, Dict[str, Any]] = {}
+_VIDEO_TASKS_LOCK = threading.Lock()
+
+def is_port_listening(port: int = 8090, host: str = "127.0.0.1") -> bool:
+    """Quickly check if TCP port is listening."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+def ensure_streaming_service() -> bool:
+    """Ensure that the 8090 streaming reconstruction engine is active and responding."""
+    # 1. Quick check: if port is already listening, verify readiness
+    if is_port_listening(8090):
+        for _ in range(6):
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        return True
+            except Exception:
+                time.sleep(0.5)
+        # If TCP connects, 8090 daemon is running and alive
+        return True
+
+    # 2. Port not listening, attempt to start 8090
+    print("[Video Service] 8090 Streaming API is not listening. Spawning background service...", flush=True)
+    cmd = [sys.executable, str(ROOT_DIR / "viewer/streaming_api_server.py"), "--host", "0.0.0.0", "--port", "8090"]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print(f"[Video Service] Failed to spawn 8090 service: {e}", flush=True)
+        return False
+
+    for _ in range(40):
+        time.sleep(0.5)
+        if is_port_listening(8090):
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        print("[Video Service] 8090 Streaming API is now ready!", flush=True)
+                        return True
+            except Exception:
+                pass
+    return is_port_listening(8090)
+
+def parse_multipart_request(headers: Any, rfile: Any, content_length: int) -> Tuple[Dict[str, str], Optional[Path], str]:
+    """Parse multipart/form-data directly, streaming any file part to outputs/uploads/."""
+    upload_dir = ROOT_DIR / "outputs" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    content_type = headers.get("Content-Type", "")
+    fields: Dict[str, str] = {}
+    saved_file_path: Optional[Path] = None
+    saved_filename = ""
+
+    if content_type.startswith("multipart/form-data"):
+        raw_body = rfile.read(content_length)
+        header_bytes = b"Content-Type: " + content_type.encode("latin1") + b"\r\n\r\n"
+        msg = email.parser.BytesParser().parsebytes(header_bytes + raw_body)
+
+        if msg.is_multipart():
+            for part in msg.get_payload():
+                cd = part.get("Content-Disposition")
+                if not cd:
+                    continue
+                name = part.get_param("name", header="Content-Disposition")
+                filename = part.get_filename()
+                payload = part.get_payload(decode=True)
+                if filename and payload:
+                    clean_name = Path(filename).name.replace(" ", "_")
+                    t_prefix = time.strftime("%Y%m%d_%H%M%S")
+                    target_path = upload_dir / f"{t_prefix}_{clean_name}"
+                    with open(target_path, "wb") as f:
+                        f.write(payload)
+                    saved_file_path = target_path
+                    saved_filename = filename
+                elif name and payload:
+                    fields[name] = payload.decode("utf-8", errors="ignore")
+    elif content_length > 0:
+        # Fallback: treat entire body as raw video data
+        t_prefix = time.strftime("%Y%m%d_%H%M%S")
+        target_path = upload_dir / f"{t_prefix}_upload.mp4"
+        with open(target_path, "wb") as f:
+            remaining = content_length
+            while remaining > 0:
+                chunk_size = min(remaining, 1024 * 1024)
+                chunk = rfile.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        saved_file_path = target_path
+        saved_filename = "upload.mp4"
+
+    return fields, saved_file_path, saved_filename
+
+async def _stream_video_frames_to_8090(
+    task_id: str,
+    video_path: Path,
+    scene_id: str,
+    session_id: str,
+    point_stride: int,
+    frame_stride: int,
+    voxel_size: float,
+    confidence_threshold: float,
+    auto_fuse: bool,
+    dynamic_filter: bool,
+) -> Dict[str, Any]:
+    ws_url = (
+        f"ws://127.0.0.1:8090/ws/stream?"
+        f"session_id={urllib.parse.quote(session_id)}&"
+        f"scene_id={urllib.parse.quote(scene_id)}&"
+        f"point_stride={point_stride}&"
+        f"frame_stride={frame_stride}&"
+        f"voxel_size={voxel_size}&"
+        f"confidence_threshold={confidence_threshold}&"
+        f"auto_fuse={'true' if auto_fuse else 'false'}&"
+        f"dynamic_filter={'true' if dynamic_filter else 'false'}&"
+        f"include_points=false"
+    )
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"无法读取视频文件: {video_path.name}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    effective_total = max(1, total_frames // frame_stride) if total_frames > 0 else 0
+
+    with _VIDEO_TASKS_LOCK:
+        if task_id in _VIDEO_TASKS:
+            _VIDEO_TASKS[task_id].update({
+                "status": "reconstructing",
+                "total_frames": total_frames,
+                "effective_frames": effective_total,
+                "video_fps": round(video_fps, 1),
+                "resolution": f"{width}x{height}",
+                "message": f"连接 8090 神经建图引擎 (视频共 {total_frames} 帧, 抽帧步长 {frame_stride})...",
+                "progress": 5.0,
+            })
+
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        handshake_raw = await ws.recv()
+        handshake = json.loads(handshake_raw)
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id]["message"] = "8090 引擎就绪，正在逐帧流式推理与自回归位姿跟踪..."
+                _VIDEO_TASKS[task_id]["progress"] = 10.0
+
+        frame_idx = 0
+        sent_count = 0
+        t0_stream = time.time()
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % frame_stride == 0:
+                success, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if success:
+                    await ws.send(buf.tobytes())
+                    sent_count += 1
+
+                    ack_raw = await ws.recv()
+                    ack = json.loads(ack_raw)
+
+                    if effective_total > 0:
+                        infer_pct = min(70.0, (sent_count / effective_total) * 70.0)
+                    else:
+                        infer_pct = min(70.0, sent_count * 0.5)
+
+                    current_progress = round(10.0 + infer_pct, 1)
+                    now = time.time()
+                    elapsed = now - t0_stream
+                    current_fps = round(sent_count / elapsed, 1) if elapsed > 0 else 0.0
+
+                    with _VIDEO_TASKS_LOCK:
+                        if task_id in _VIDEO_TASKS:
+                            _VIDEO_TASKS[task_id].update({
+                                "current_frame": sent_count,
+                                "progress": current_progress,
+                                "fps": current_fps,
+                                "message": f"3D 神经流式建图中: 帧 {sent_count}/{effective_total} ({current_progress}%, {current_fps} FPS)",
+                                "updated_at": now,
+                            })
+
+            frame_idx += 1
+
+        cap.release()
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "finalizing",
+                    "progress": 82.0,
+                    "message": "视频所有帧已推送完毕，正在进行空间体素滤波去重与三维点云固化...",
+                    "updated_at": time.time(),
+                })
+
+        await ws.send(json.dumps({"type": "EOS"}))
+
+        if auto_fuse:
+            with _VIDEO_TASKS_LOCK:
+                if task_id in _VIDEO_TASKS:
+                    _VIDEO_TASKS[task_id].update({
+                        "progress": 88.0,
+                        "message": "正在执行跨视角多模态配准与 optv2 全局几何与点云优化 (PGO + MLS + 去噪)...",
+                        "updated_at": time.time(),
+                    })
+
+        summary_raw = await ws.recv()
+        summary = json.loads(summary_raw)
+        return summary
+
+def run_video_pipeline_thread(
+    task_id: str,
+    video_path: Path,
+    scene_id: str,
+    session_id: str,
+    point_stride: int,
+    frame_stride: int,
+    voxel_size: float,
+    confidence_threshold: float,
+    auto_fuse: bool,
+    dynamic_filter: bool,
+) -> None:
+    try:
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id]["message"] = "检查 8090 神经建图推理服务状态..."
+                _VIDEO_TASKS[task_id]["progress"] = 3.0
+
+        if not ensure_streaming_service():
+            raise RuntimeError("8090 实时流式建图服务未启动且自动拉起超时，请先检查服务状态")
+
+        summary = asyncio.run(
+            _stream_video_frames_to_8090(
+                task_id=task_id,
+                video_path=video_path,
+                scene_id=scene_id,
+                session_id=session_id,
+                point_stride=point_stride,
+                frame_stride=frame_stride,
+                voxel_size=voxel_size,
+                confidence_threshold=confidence_threshold,
+                auto_fuse=auto_fuse,
+                dynamic_filter=dynamic_filter,
+            )
+        )
+
+        scan_all_ply_models(force=True)
+
+        clean_scene_id = summary.get("scene_id", scene_id)
+        folder_name = summary.get("folder_name", session_id)
+
+        scene_disk_ply = ROOT_DIR / "outputs" / "scenes" / clean_scene_id / "reconstruction.ply"
+        stream_disk_ply = ROOT_DIR / "outputs" / "streams" / folder_name / "reconstruction.ply"
+
+        if scene_disk_ply.is_file():
+            viewer_url = f"/outputs/scenes/{clean_scene_id}/reconstruction.ply"
+        elif stream_disk_ply.is_file():
+            viewer_url = f"/outputs/streams/{folder_name}/reconstruction.ply"
+        else:
+            viewer_url = summary.get("scene_download_url") or summary.get("deliverables", {}).get("ply_url")
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "completed",
+                    "progress": 100.0,
+                    "message": "🎉 3D 建图与优化已全部完成！",
+                    "result": summary,
+                    "viewer_url": viewer_url,
+                    "scene_id": clean_scene_id,
+                    "folder_name": folder_name,
+                    "dedup_point_count": summary.get("dedup_point_count", 0),
+                    "updated_at": time.time(),
+                })
+        print(f"[Video Pipeline] Task [{task_id}] finished successfully! Viewer URL: {viewer_url}", flush=True)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "failed",
+                    "error": str(e),
+                    "message": f"建图失败: {e}",
+                    "updated_at": time.time(),
+                })
+
 class StreamingRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT_DIR), **kwargs)
@@ -339,7 +653,29 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_status()
         if path == "/api/stop":
             return self.handle_stop_stream()
+
+        # Video Upload & 3D Reconstruction Endpoints (8090 Pipeline Bridge)
+        if path in ("/api/video/status", "/api/upload/status"):
+            return self.handle_video_status(parsed_url.query)
+        if path in ("/api/video/tasks", "/api/upload/tasks"):
+            return self.handle_video_tasks()
+        if path in ("/api/video/progress", "/api/upload/progress"):
+            return self.handle_video_progress_sse(parsed_url.query)
+        if path == "/api/scenes":
+            return self.handle_scenes_list()
+
         return super().do_GET()
+
+    def do_POST(self) -> None:
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+
+        if path in ("/api/video/upload", "/api/upload_video", "/api/video/reconstruct"):
+            return self.handle_video_upload(parsed_url.query)
+        if path == "/api/stop":
+            return self.handle_stop_stream()
+
+        self.send_error(404, f"POST endpoint not found: {path}")
 
     def handle_offline_models(self) -> None:
         """List all reconstructed 3D point cloud models stored on disk in outputs/."""
@@ -569,6 +905,231 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({"status": "stopped"}).encode("utf-8"))
+
+    def handle_video_upload(self, query_string: str) -> None:
+        """Receive uploaded video file and trigger 8090 causal 3D reconstruction and optimization."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Missing video payload (Content-Length is 0)"}).encode("utf-8"))
+            return
+
+        fields, saved_file_path, original_filename = parse_multipart_request(self.headers, self.rfile, content_length)
+
+        # Merge URL query parameters into fields
+        params = urllib.parse.parse_qs(query_string)
+        for k, v in params.items():
+            if k not in fields and v:
+                fields[k] = v[0]
+
+        if not saved_file_path or not saved_file_path.is_file():
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "No valid video file uploaded"}).encode("utf-8"))
+            return
+
+        stem_clean = Path(original_filename).stem if original_filename else "video"
+        stem_clean = stem_clean.replace(" ", "_").replace("-", "_")
+
+        scene_id = fields.get("scene_id", "").strip() or stem_clean
+        session_id = fields.get("session_id", "").strip()
+        if not session_id:
+            t_str = time.strftime("%Y%m%d_%H%M%S")
+            session_id = f"{scene_id}_{t_str}"
+
+        point_stride = int(fields.get("point_stride", 2))
+        frame_stride = int(fields.get("frame_stride", 1))
+        voxel_size = float(fields.get("voxel_size", 0.003))
+        confidence_threshold = float(fields.get("confidence_threshold", 0.1))
+        auto_fuse = str(fields.get("auto_fuse", "true")).lower() in ("true", "1", "yes")
+        dynamic_filter = str(fields.get("dynamic_filter", "false")).lower() in ("true", "1", "yes")
+        wait_for_completion = str(fields.get("wait", "false")).lower() in ("true", "1", "yes")
+
+        task_id = f"task_{session_id}"
+        with _VIDEO_TASKS_LOCK:
+            _VIDEO_TASKS[task_id] = {
+                "task_id": task_id,
+                "status": "queued",
+                "progress": 0.0,
+                "message": "视频已上传，排队等待 3D 建图推理...",
+                "scene_id": scene_id,
+                "session_id": session_id,
+                "video_path": str(saved_file_path),
+                "original_filename": original_filename,
+                "point_stride": point_stride,
+                "frame_stride": frame_stride,
+                "voxel_size": voxel_size,
+                "confidence_threshold": confidence_threshold,
+                "auto_fuse": auto_fuse,
+                "dynamic_filter": dynamic_filter,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "current_frame": 0,
+                "total_frames": 0,
+                "fps": 0.0,
+                "result": None,
+                "error": None,
+            }
+
+        worker = threading.Thread(
+            target=run_video_pipeline_thread,
+            kwargs={
+                "task_id": task_id,
+                "video_path": saved_file_path,
+                "scene_id": scene_id,
+                "session_id": session_id,
+                "point_stride": point_stride,
+                "frame_stride": frame_stride,
+                "voxel_size": voxel_size,
+                "confidence_threshold": confidence_threshold,
+                "auto_fuse": auto_fuse,
+                "dynamic_filter": dynamic_filter,
+            },
+            daemon=True,
+        )
+        worker.start()
+
+        if wait_for_completion:
+            while True:
+                with _VIDEO_TASKS_LOCK:
+                    t_info = _VIDEO_TASKS.get(task_id, {})
+                    status = t_info.get("status")
+                if status in ("completed", "failed"):
+                    break
+                time.sleep(0.5)
+
+            self.send_response(200 if status == "completed" else 500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(t_info, ensure_ascii=False).encode("utf-8"))
+            return
+
+        resp_data = {
+            "status": "queued",
+            "task_id": task_id,
+            "scene_id": scene_id,
+            "session_id": session_id,
+            "message": "视频已成功接收并加入建图任务队列",
+            "status_url": f"/api/video/status?task_id={task_id}",
+            "progress_url": f"/api/video/progress?task_id={task_id}",
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp_data, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_status(self, query_string: str) -> None:
+        """Query status of a specific video reconstruction task or list all."""
+        params = urllib.parse.parse_qs(query_string)
+        task_id = params.get("task_id", [""])[0]
+        with _VIDEO_TASKS_LOCK:
+            if not task_id:
+                tasks = list(_VIDEO_TASKS.values())
+                data = {"tasks": tasks}
+            elif task_id in _VIDEO_TASKS:
+                data = _VIDEO_TASKS[task_id]
+            else:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Task '{task_id}' not found"}).encode("utf-8"))
+                return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_tasks(self) -> None:
+        """Return list of recent video reconstruction tasks."""
+        with _VIDEO_TASKS_LOCK:
+            tasks = list(_VIDEO_TASKS.values())
+        tasks.sort(key=lambda t: t.get("created_at", 0), reverse=True)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(tasks, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_progress_sse(self, query_string: str) -> None:
+        """Server-Sent Events stream for real-time task progress reporting."""
+        params = urllib.parse.parse_qs(query_string)
+        task_id = params.get("task_id", [""])[0]
+        if not task_id:
+            self.send_error(400, "Missing task_id parameter")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        last_progress = -1.0
+        last_status = ""
+        while True:
+            with _VIDEO_TASKS_LOCK:
+                task = _VIDEO_TASKS.get(task_id)
+                if not task:
+                    break
+                status = task.get("status", "")
+                progress = task.get("progress", 0.0)
+                snapshot = dict(task)
+
+            if progress != last_progress or status != last_status:
+                last_progress = progress
+                last_status = status
+                try:
+                    payload = f"event: progress\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+                    self.wfile.write(payload.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    break
+
+            if status in ("completed", "failed"):
+                try:
+                    event_name = "complete" if status == "completed" else "error"
+                    payload = f"event: {event_name}\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+                    self.wfile.write(payload.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                break
+
+            time.sleep(0.3)
+
+    def handle_scenes_list(self) -> None:
+        """List all registered scenes in outputs/scenes/."""
+        scenes_dir = ROOT_DIR / "outputs" / "scenes"
+        results = []
+        if scenes_dir.is_dir():
+            for d in sorted(scenes_dir.iterdir()):
+                if d.is_dir() and not d.name.startswith("."):
+                    ply = d / "reconstruction.ply"
+                    colored_ply = d / "reconstruction_colored.ply"
+                    meta_file = d / "scene_metadata.json"
+                    meta = {}
+                    if meta_file.is_file():
+                        try:
+                            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                    results.append({
+                        "scene_id": d.name,
+                        "has_ply": ply.is_file(),
+                        "has_colored_ply": colored_ply.is_file(),
+                        "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2) if ply.is_file() else 0.0,
+                        "streams": meta.get("completed_sessions", []),
+                        "is_fused": meta.get("is_fused", False),
+                        "updated_at": meta.get("updated_at"),
+                    })
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(results, ensure_ascii=False).encode("utf-8"))
 
 
     def handle_sse_stream(self, query_string: str) -> None:
