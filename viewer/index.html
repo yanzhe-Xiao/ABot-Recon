@@ -1461,7 +1461,18 @@
           originalBBox.getSize(dim);
           document.getElementById('stat-bbox').innerText = `${dim.x.toFixed(2)} × ${dim.y.toFixed(2)} × ${dim.z.toFixed(2)} m`;
           gridHelper.position.y = originalBBox.max.y + 0.1;
-        if (parsed.is3DGS || url.includes('3dgs')) {
+        }
+
+        const convertBtnContainer = document.getElementById('btn-convert-3dgs-container');
+        if (convertBtnContainer) {
+          if (parsed.is3DGS || url.includes('3dgs') || url.includes('splat')) {
+            convertBtnContainer.style.display = 'none';
+          } else {
+            convertBtnContainer.style.display = 'block';
+          }
+        }
+
+        if (parsed.is3DGS || url.includes('3dgs') || url.includes('splat')) {
           showToast(`✨ 已成功加载 3DGS 高斯泼溅模型 (${parsed.vertexCount.toLocaleString()} 实体高斯)`);
           const sizeInput = document.getElementById('point-size');
           if (sizeInput) {
@@ -1476,7 +1487,6 @@
         await loadTrajectory(url);
         await checkAndSetupVideoHUD(url);
         resetView();
-        showToast(`✅ 已成功加载 ${parsed.vertexCount.toLocaleString()} 个三维空间点`);
       } catch (err) {
         alert("加载点云失败: " + err.message);
       }
