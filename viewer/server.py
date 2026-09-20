@@ -641,6 +641,20 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content)
                 return
+        if path in ("/gaussian.html", "/splat", "/gaussian", "/viewer/gaussian.html"):
+            gauss_path = ROOT_DIR / "viewer" / "gaussian.html"
+            if gauss_path.is_file():
+                with open(gauss_path, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.end_headers()
+                self.wfile.write(content)
+                return
         if path == "/api/stream":
             return self.handle_sse_stream(parsed_url.query)
         if path == "/api/video_info":

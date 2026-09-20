@@ -414,7 +414,9 @@
     <h1>ABot-Recon 3D 实时流式建图系统</h1>
     <span class="badge" id="backend-badge">FlashInfer Paged KV</span>
     <span class="badge-live" id="live-indicator">● LIVE STREAMING</span>
-  </div>
+    <a href="/gaussian.html" target="_blank" style="margin-left:auto; text-decoration:none; display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; padding:5px 14px; border-radius:20px; background:linear-gradient(135deg, rgba(236,72,153,0.35), rgba(168,85,247,0.45)); color:#fdf2f8; border:1px solid rgba(236,72,153,0.6); box-shadow:0 2px 12px rgba(236,72,153,0.35); transition:all 0.2s;">
+      <span>✨ 3DGS 原生高斯漫游器 ↗</span>
+    </a>
 
   <!-- 侧边交互控制器 -->
   <div class="control-panel">
@@ -624,6 +626,11 @@
           </button>
         </div>
       </div>
+        <div id="btn-launch-gaussian-container" style="display:none; margin-top:8px;">
+          <a id="btn-launch-gaussian" href="/gaussian.html" target="_blank" style="width:100%; font-size:12px; font-weight:700; padding:10px 14px; border-radius:6px; border:1px solid rgba(168,85,247,0.7); background:linear-gradient(135deg, rgba(168,85,247,0.3), rgba(59,130,246,0.35)); color:#e9d5ff; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; text-decoration:none; box-shadow:0 4px 14px rgba(168,85,247,0.25); transition:all 0.2s;">
+            <span>🌌 进入 3DGS 原生高斯泼溅渲染漫游 (60+ FPS) ↗</span>
+          </a>
+        </div>
       <div class="control-group">
         <input type="file" id="file-input" accept=".ply">
       </div>
@@ -2115,17 +2122,24 @@
         badge.style.display = 'block';
         pathText.innerText = selectedOpt.dataset.path;
         metaText.innerText = selectedOpt.dataset.desc || '';
-        if (convertContainer) {
-          const val = selectedOpt.value || '';
-          if (val.includes('3dgs') || val.includes('splat')) {
-            convertContainer.style.display = 'none';
-          } else {
-            convertContainer.style.display = 'block';
+        const launchContainer = document.getElementById('btn-launch-gaussian-container');
+        const val = selectedOpt.value || '';
+        if (val.includes('3dgs') || val.includes('splat')) {
+          if (convertContainer) convertContainer.style.display = 'none';
+          if (launchContainer) {
+            launchContainer.style.display = 'block';
+            const launchBtn = document.getElementById('btn-launch-gaussian');
+            if (launchBtn) launchBtn.href = `/gaussian.html?url=${encodeURIComponent(val)}`;
           }
+        } else {
+          if (convertContainer) convertContainer.style.display = 'block';
+          if (launchContainer) launchContainer.style.display = 'none';
         }
       } else {
         badge.style.display = 'none';
         if (convertContainer) convertContainer.style.display = 'none';
+        const launchContainer = document.getElementById('btn-launch-gaussian-container');
+        if (launchContainer) launchContainer.style.display = 'none';
       }
     }
 

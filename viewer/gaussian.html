@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABot-Recon - 3D Gaussian Splatting 原生高斯泼溅渲染器</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0b0f19;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      color: #e2e8f0;
+    }
+    #canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+    #canvas:active {
+      cursor: grabbing;
+    }
+    /* Top HUD Panel */
+    .hud-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      border-radius: 12px;
+      padding: 14px 18px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      pointer-events: auto;
+      min-width: 320px;
+      max-width: 440px;
+      z-index: 10;
+    }
+    .hud-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #60a5fa;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      border-bottom: 1px solid rgba(59, 130, 246, 0.2);
+      padding-bottom: 6px;
+    }
+    .hud-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: rgba(236, 72, 153, 0.25);
+      color: #f472b6;
+      border: 1px solid rgba(236, 72, 153, 0.4);
+    }
+    .hud-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-top: 5px;
+      color: #94a3b8;
+    }
+    .hud-row span.val {
+      color: #f8fafc;
+      font-family: monospace;
+      font-weight: 600;
+    }
+    /* Controls hint */
+    .controls-hint {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.1);
+      font-size: 11px;
+      color: #64748b;
+      line-height: 1.6;
+    }
+    .controls-hint b {
+      color: #cbd5e1;
+    }
+    /* Action Buttons */
+    .action-bar {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+    }
+    .btn-action {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      color: #93c5fd;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      text-decoration: none;
+    }
+    .btn-action:hover {
+      background: rgba(59, 130, 246, 0.25);
+      border-color: #60a5fa;
+      color: #ffffff;
+      transform: translateY(-1px);
+    }
+    /* Loading overlay */
+    #loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(11, 15, 25, 0.95);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 0.5s ease;
+    }
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(59, 130, 246, 0.2);
+      border-top-color: #ec4899;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    #loading-text {
+      font-size: 16px;
+      color: #f1f5f9;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    #loading-subtext {
+      font-size: 12px;
+      color: #64748b;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 3D Canvas -->
+  <canvas id="canvas"></canvas>
+
+  <!-- Top Left HUD -->
+  <div class="hud-panel">
+    <div class="hud-title">
+      <span>✨ 3DGS 原生高斯泼溅渲染</span>
+      <span class="hud-badge" id="hud-badge">EWA WebGL2</span>
+    </div>
+    <div class="hud-row">
+      <span>模型资产:</span>
+      <span class="val" id="hud-model-name">加载中...</span>
+    </div>
+    <div class="hud-row">
+      <span>高斯基元总数:</span>
+      <span class="val" id="hud-splat-count">-</span>
+    </div>
+    <div class="hud-row">
+      <span>实时渲染帧率:</span>
+      <span class="val" id="hud-fps" style="color:#4ade80;">- FPS</span>
+    </div>
+    <div class="hud-row">
+      <span>渲染管线:</span>
+      <span class="val">各向异性高斯椭球体连续体</span>
+    </div>
+    <div class="controls-hint">
+      <b>操作指南:</b><br>
+      • <b>鼠标左键拖拽</b>：旋转视角 (Orbit)<br>
+      • <b>鼠标右键 / Shift+拖拽</b>：平移视角 (Pan)<br>
+      • <b>滚轮</b>：推进 / 远离 (Zoom)<br>
+      • <b>空格键</b>：重置最佳全局视角
+    </div>
+  </div>
+
+  <!-- Action Bar -->
+  <div class="action-bar">
+    <a href="/" class="btn-action">
+      <span>⬅️ 返回点云控制台</span>
+    </a>
+    <button class="btn-action" id="btn-reset-view" type="button">
+      <span>🎯 重置视角</span>
+    </button>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">正在加载 3D 高斯泼溅场景...</div>
+    <div id="loading-subtext">正在解算高斯协方差矩阵与色彩通道...</div>
+  </div>
+
+  <!-- WebGL2 Gaussian Splatting Shaders & Engine -->
+  <script>
+    // --------------------------------------------------------------------------
+    // 1. Math Helpers
+    // --------------------------------------------------------------------------
+    function getProjectionMatrix(fx, fy, width, height) {
+      const znear = 0.1;
+      const zfar = 200.0;
+      return [
+        (2 * fx) / width, 0, 0, 0,
+        0, -(2 * fy) / height, 0, 0,
+        0, 0, zfar / (zfar - znear), 1,
+        0, 0, -(zfar * znear) / (zfar - znear), 0,
+      ];
+    }
+
+    function multiply4(a, b) {
+      return [
+        b[0]*a[0] + b[1]*a[4] + b[2]*a[8] + b[3]*a[12],
+        b[0]*a[1] + b[1]*a[5] + b[2]*a[9] + b[3]*a[13],
+        b[0]*a[2] + b[1]*a[6] + b[2]*a[10] + b[3]*a[14],
+        b[0]*a[3] + b[1]*a[7] + b[2]*a[11] + b[3]*a[15],
+        b[4]*a[0] + b[5]*a[4] + b[6]*a[8] + b[7]*a[12],
+        b[4]*a[1] + b[5]*a[5] + b[6]*a[9] + b[7]*a[13],
+        b[4]*a[2] + b[5]*a[6] + b[6]*a[10] + b[7]*a[14],
+        b[4]*a[3] + b[5]*a[7] + b[6]*a[11] + b[7]*a[15],
+        b[8]*a[0] + b[9]*a[4] + b[10]*a[8] + b[11]*a[12],
+        b[8]*a[1] + b[9]*a[5] + b[10]*a[9] + b[11]*a[13],
+        b[8]*a[2] + b[9]*a[6] + b[10]*a[10] + b[11]*a[14],
+        b[8]*a[3] + b[9]*a[7] + b[10]*a[11] + b[11]*a[15],
+        b[12]*a[0] + b[13]*a[4] + b[14]*a[8] + b[15]*a[12],
+        b[12]*a[1] + b[13]*a[5] + b[14]*a[9] + b[15]*a[13],
+        b[12]*a[2] + b[13]*a[6] + b[14]*a[10] + b[15]*a[14],
+        b[12]*a[3] + b[13]*a[7] + b[14]*a[11] + b[15]*a[15],
+      ];
+    }
+
+    function invert4(a) {
+      let b00 = a[0]*a[5] - a[1]*a[4], b01 = a[0]*a[6] - a[2]*a[4], b02 = a[0]*a[7] - a[3]*a[4];
+      let b03 = a[1]*a[6] - a[2]*a[5], b04 = a[1]*a[7] - a[3]*a[5], b05 = a[2]*a[7] - a[3]*a[6];
+      let b06 = a[8]*a[13] - a[9]*a[12], b07 = a[8]*a[14] - a[10]*a[12], b08 = a[8]*a[15] - a[11]*a[12];
+      let b09 = a[9]*a[14] - a[10]*a[13], b10 = a[9]*a[15] - a[11]*a[13], b11 = a[10]*a[15] - a[11]*a[14];
+      let det = b00*b11 - b01*b10 + b02*b09 + b03*b08 - b04*b07 + b05*b06;
+      if (!det) return null;
+      return [
+        (a[5]*b11 - a[6]*b10 + a[7]*b09) / det,
+        (a[2]*b10 - a[1]*b11 - a[3]*b09) / det,
+        (a[13]*b05 - a[14]*b04 + a[15]*b03) / det,
+        (a[10]*b04 - a[9]*b05 - a[11]*b03) / det,
+        (a[6]*b08 - a[4]*b11 - a[7]*b07) / det,
+        (a[0]*b11 - a[2]*b08 + a[3]*b07) / det,
+        (a[14]*b02 - a[12]*b05 - a[15]*b01) / det,
+        (a[8]*b05 - a[10]*b02 + a[11]*b01) / det,
+        (a[4]*b10 - a[5]*b08 + a[7]*b06) / det,
+        (a[1]*b08 - a[0]*b10 - a[3]*b06) / det,
+        (a[12]*b04 - a[13]*b02 + a[15]*b00) / det,
+        (a[9]*b02 - a[8]*b04 - a[11]*b00) / det,
+        (a[5]*b07 - a[4]*b09 - a[6]*b06) / det,
+        (a[0]*b09 - a[1]*b07 + a[2]*b06) / det,
+        (a[13]*b01 - a[12]*b03 - a[14]*b00) / det,
+        (a[8]*b03 - a[9]*b01 + a[10]*b00) / det,
+      ];
+    }
+
+    function rotate4(a, rad, x, y, z) {
+      let len = Math.hypot(x, y, z);
+      x /= len; y /= len; z /= len;
+      let s = Math.sin(rad), c = Math.cos(rad), t = 1 - c;
+      let b00 = x*x*t + c, b01 = y*x*t + z*s, b02 = z*x*t - y*s;
+      let b10 = x*y*t - z*s, b11 = y*y*t + c, b12 = z*y*t + x*s;
+      let b20 = x*z*t + y*s, b21 = y*z*t - x*s, b22 = z*z*t + c;
+      return [
+        a[0]*b00 + a[4]*b01 + a[8]*b02,
+        a[1]*b00 + a[5]*b01 + a[9]*b02,
+        a[2]*b00 + a[6]*b01 + a[10]*b02,
+        a[3]*b00 + a[7]*b01 + a[11]*b02,
+        a[0]*b10 + a[4]*b11 + a[8]*b12,
+        a[1]*b10 + a[5]*b11 + a[9]*b12,
+        a[2]*b10 + a[6]*b11 + a[10]*b12,
+        a[3]*b10 + a[7]*b11 + a[11]*b12,
+        a[0]*b20 + a[4]*b21 + a[8]*b22,
+        a[1]*b20 + a[5]*b21 + a[9]*b22,
+        a[2]*b20 + a[6]*b21 + a[10]*b22,
+        a[3]*b20 + a[7]*b21 + a[11]*b22,
+        ...a.slice(12, 16),
+      ];
+    }
+
+    function translate4(a, x, y, z) {
+      return [
+        ...a.slice(0, 12),
+        a[0]*x + a[4]*y + a[8]*z + a[12],
+        a[1]*x + a[5]*y + a[9]*z + a[13],
+        a[2]*x + a[6]*y + a[10]*z + a[14],
+        a[3]*x + a[7]*y + a[11]*z + a[15],
+      ];
+    }
+
+    // --------------------------------------------------------------------------
+    // 2. WebGL Worker (Radix Sort & Texture Generation)
+    // --------------------------------------------------------------------------
+    function createWorker(self) {
+      let buffer;
+      let vertexCount = 0;
+      let viewProj;
+      const rowLength = 3 * 4 + 3 * 4 + 4 + 4; // 32 bytes per splat
+      let lastProj = [];
+      let depthIndex = new Uint32Array();
+      let lastVertexCount = 0;
+
+      const _floatView = new Float32Array(1);
+      const _int32View = new Int32Array(_floatView.buffer);
+
+      function floatToHalf(float) {
+        _floatView[0] = float;
+        let f = _int32View[0];
+        let sign = (f >> 31) & 0x0001;
+        let exp = (f >> 23) & 0x00ff;
+        let frac = f & 0x007fffff;
+        let newExp;
+        if (exp == 0) newExp = 0;
+        else if (exp < 113) {
+          newExp = 0;
+          frac |= 0x00800000;
+          frac = frac >> (113 - exp);
+          if (frac & 0x01000000) newExp = 1, frac = 0;
+        } else if (exp < 142) newExp = exp - 112;
+        else newExp = 31, frac = 0;
+        return (sign << 15) | (newExp << 10) | (frac >> 13);
+      }
+
+      function packHalf2x16(x, y) {
+        return (floatToHalf(x) | (floatToHalf(y) << 16)) >>> 0;
+      }
+
+      function generateTexture() {
+        if (!buffer) return;
+        const f_buffer = new Float32Array(buffer);
+        const u_buffer = new Uint8Array(buffer);
+        const texwidth = 1024 * 2;
+        const texheight = Math.ceil((2 * vertexCount) / texwidth);
+        const texdata = new Uint32Array(texwidth * texheight * 4);
+        const texdata_c = new Uint8Array(texdata.buffer);
+        const texdata_f = new Float32Array(texdata.buffer);
+
+        for (let i = 0; i < vertexCount; i++) {
+          texdata_f[8 * i + 0] = f_buffer[8 * i + 0];
+          texdata_f[8 * i + 1] = f_buffer[8 * i + 1];
+          texdata_f[8 * i + 2] = f_buffer[8 * i + 2];
+
+          texdata_c[4 * (8 * i + 7) + 0] = u_buffer[32 * i + 24 + 0];
+          texdata_c[4 * (8 * i + 7) + 1] = u_buffer[32 * i + 24 + 1];
+          texdata_c[4 * (8 * i + 7) + 2] = u_buffer[32 * i + 24 + 2];
+          texdata_c[4 * (8 * i + 7) + 3] = u_buffer[32 * i + 24 + 3];
+
+          let scale = [f_buffer[8 * i + 3 + 0], f_buffer[8 * i + 3 + 1], f_buffer[8 * i + 3 + 2]];
+          let rot = [
+            (u_buffer[32 * i + 28 + 0] - 128) / 128,
+            (u_buffer[32 * i + 28 + 1] - 128) / 128,
+            (u_buffer[32 * i + 28 + 2] - 128) / 128,
+            (u_buffer[32 * i + 28 + 3] - 128) / 128,
+          ];
+
+          const M = [
+            1.0 - 2.0 * (rot[2] * rot[2] + rot[3] * rot[3]),
+            2.0 * (rot[1] * rot[2] + rot[0] * rot[3]),
+            2.0 * (rot[1] * rot[3] - rot[0] * rot[2]),
+            2.0 * (rot[1] * rot[2] - rot[0] * rot[3]),
+            1.0 - 2.0 * (rot[1] * rot[1] + rot[3] * rot[3]),
+            2.0 * (rot[2] * rot[3] + rot[0] * rot[1]),
+            2.0 * (rot[1] * rot[3] + rot[0] * rot[2]),
+            2.0 * (rot[2] * rot[3] - rot[0] * rot[1]),
+            1.0 - 2.0 * (rot[1] * rot[1] + rot[2] * rot[2]),
+          ].map((k, idx) => k * scale[Math.floor(idx / 3)]);
+
+          const sigma = [
+            M[0] * M[0] + M[3] * M[3] + M[6] * M[6],
+            M[0] * M[1] + M[3] * M[4] + M[6] * M[7],
+            M[0] * M[2] + M[3] * M[5] + M[6] * M[8],
+            M[1] * M[1] + M[4] * M[4] + M[7] * M[7],
+            M[1] * M[2] + M[4] * M[5] + M[7] * M[8],
+            M[2] * M[2] + M[5] * M[5] + M[8] * M[8],
+          ];
+
+          texdata[8 * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]);
+          texdata[8 * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]);
+          texdata[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
+        }
+        self.postMessage({ texdata, texwidth, texheight }, [texdata.buffer]);
+      }
+
+      function runSort(viewProj) {
+        if (!buffer) return;
+        const f_buffer = new Float32Array(buffer);
+        if (lastVertexCount == vertexCount) {
+          let dot = lastProj[2] * viewProj[2] + lastProj[6] * viewProj[6] + lastProj[10] * viewProj[10];
+          if (Math.abs(dot - 1) < 0.01) return;
+        } else {
+          generateTexture();
+          lastVertexCount = vertexCount;
+        }
+
+        let maxDepth = -Infinity;
+        let minDepth = Infinity;
+        let sizeList = new Int32Array(vertexCount);
+        for (let i = 0; i < vertexCount; i++) {
+          let depth = ((viewProj[2] * f_buffer[8 * i + 0] + viewProj[6] * f_buffer[8 * i + 1] + viewProj[10] * f_buffer[8 * i + 2]) * 4096) | 0;
+          sizeList[i] = depth;
+          if (depth > maxDepth) maxDepth = depth;
+          if (depth < minDepth) minDepth = depth;
+        }
+
+        let depthInv = (256 * 256 - 1) / (maxDepth - minDepth);
+        let counts0 = new Uint32Array(256 * 256);
+        for (let i = 0; i < vertexCount; i++) {
+          sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
+          counts0[sizeList[i]]++;
+        }
+        let starts0 = new Uint32Array(256 * 256);
+        for (let i = 1; i < 256 * 256; i++) starts0[i] = starts0[i - 1] + counts0[i - 1];
+        depthIndex = new Uint32Array(vertexCount);
+        for (let i = 0; i < vertexCount; i++) depthIndex[starts0[sizeList[i]]++] = i;
+
+        lastProj = viewProj;
+        self.postMessage({ depthIndex, viewProj, vertexCount }, [depthIndex.buffer]);
+      }
+
+      function processPlyBuffer(inputBuffer) {
+        const ubuf = new Uint8Array(inputBuffer);
+        const header = new TextDecoder().decode(ubuf.slice(0, 1024 * 10));
+        const header_end = "end_header\n";
+        const header_end_index = header.indexOf(header_end);
+        if (header_end_index < 0) throw new Error("Unable to read .ply file header");
+        const vertexCount = parseInt(/element vertex (\d+)\n/.exec(header)[1], 10);
+        let row_offset = 0, offsets = {}, types = {};
+        const TYPE_MAP = {
+          double: "getFloat64", int: "getInt32", uint: "getUint32", float: "getFloat32",
+          short: "getInt16", ushort: "getUint16", uchar: "getUint8", uint8: "getUint8"
+        };
+        for (let prop of header.slice(0, header_end_index).split("\n").filter((k) => k.startsWith("property "))) {
+          const [p, type, name] = prop.split(" ");
+          const arrayType = TYPE_MAP[type] || "getInt8";
+          types[name] = arrayType;
+          offsets[name] = row_offset;
+          row_offset += parseInt(arrayType.replace(/[^\d]/g, ""), 10) / 8;
+        }
+
+        const dataView = new DataView(inputBuffer, header_end_index + header_end.length);
+        let row = 0;
+        const attrs = new Proxy({}, {
+          get(target, prop) {
+            if (!types[prop]) return 0.0;
+            return dataView[types[prop]](row * row_offset + offsets[prop], true);
+          },
+        });
+
+        const rowLength = 32;
+        const buffer = new ArrayBuffer(rowLength * vertexCount);
+        for (let j = 0; j < vertexCount; j++) {
+          row = j;
+          const position = new Float32Array(buffer, j * rowLength, 3);
+          const scales = new Float32Array(buffer, j * rowLength + 12, 3);
+          const rgba = new Uint8ClampedArray(buffer, j * rowLength + 24, 4);
+          const rot = new Uint8ClampedArray(buffer, j * rowLength + 28, 4);
+
+          if (types["scale_0"]) {
+            const qlen = Math.hypot(attrs.rot_0, attrs.rot_1, attrs.rot_2, attrs.rot_3) || 1.0;
+            rot[0] = (attrs.rot_0 / qlen) * 128 + 128;
+            rot[1] = (attrs.rot_1 / qlen) * 128 + 128;
+            rot[2] = (attrs.rot_2 / qlen) * 128 + 128;
+            rot[3] = (attrs.rot_3 / qlen) * 128 + 128;
+
+            scales[0] = Math.exp(attrs.scale_0);
+            scales[1] = Math.exp(attrs.scale_1);
+            scales[2] = Math.exp(attrs.scale_2);
+          } else {
+            scales[0] = 0.008; scales[1] = 0.008; scales[2] = 0.001;
+            rot[0] = 255; rot[1] = 0; rot[2] = 0; rot[3] = 0;
+          }
+
+          position[0] = attrs.x;
+          position[1] = attrs.y;
+          position[2] = attrs.z;
+
+          if (types["f_dc_0"]) {
+            const SH_C0 = 0.28209479177387814;
+            rgba[0] = Math.min(255, Math.max(0, (0.5 + SH_C0 * attrs.f_dc_0) * 255));
+            rgba[1] = Math.min(255, Math.max(0, (0.5 + SH_C0 * attrs.f_dc_1) * 255));
+            rgba[2] = Math.min(255, Math.max(0, (0.5 + SH_C0 * attrs.f_dc_2) * 255));
+          } else if (types["red"]) {
+            rgba[0] = attrs.red; rgba[1] = attrs.green; rgba[2] = attrs.blue;
+          } else {
+            rgba[0] = 200; rgba[1] = 200; rgba[2] = 200;
+          }
+
+          if (types["opacity"]) {
+            rgba[3] = Math.min(255, Math.max(0, (1 / (1 + Math.exp(-attrs.opacity))) * 255));
+          } else {
+            rgba[3] = 240;
+          }
+        }
+        return buffer;
+      }
+
+      const throttledSort = () => {
+        if (!sortRunning) {
+          sortRunning = true;
+          let lastView = viewProj;
+          runSort(lastView);
+          setTimeout(() => {
+            sortRunning = false;
+            if (lastView !== viewProj) throttledSort();
+          }, 0);
+        }
+      };
+
+      let sortRunning;
+      self.onmessage = (e) => {
+        if (e.data.ply) {
+          buffer = processPlyBuffer(e.data.ply);
+          vertexCount = Math.floor(buffer.byteLength / rowLength);
+          self.postMessage({ buffer, vertexCount });
+          runSort(viewProj || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
+        } else if (e.data.buffer) {
+          buffer = e.data.buffer;
+          vertexCount = Math.floor(buffer.byteLength / rowLength);
+          self.postMessage({ buffer, vertexCount });
+          runSort(viewProj || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
+        } else if (e.data.view) {
+          viewProj = e.data.view;
+          throttledSort();
+        }
+      };
+    }
+
+    // --------------------------------------------------------------------------
+    // 3. WebGL2 Shaders
+    // --------------------------------------------------------------------------
+    const vertexShaderSource = `#version 300 es
+    precision highp float;
+    precision highp int;
+
+    uniform highp usampler2D u_texture;
+    uniform mat4 projection, view;
+    uniform vec2 focal;
+    uniform vec2 viewport;
+
+    in vec2 position;
+    in int index;
+
+    out vec4 vColor;
+    out vec2 vPosition;
+
+    void main () {
+        uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+        vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1);
+        vec4 pos2d = projection * cam;
+
+        float clip = 1.2 * pos2d.w;
+        if (pos2d.z < -clip || pos2d.x < -clip || pos2d.x > clip || pos2d.y < -clip || pos2d.y > clip) {
+            gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+            return;
+        }
+
+        uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+        vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
+        mat3 Vrk = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
+
+        mat3 J = mat3(
+            focal.x / cam.z, 0., -(focal.x * cam.x) / (cam.z * cam.z),
+            0., -focal.y / cam.z, (focal.y * cam.y) / (cam.z * cam.z),
+            0., 0., 0.
+        );
+
+        mat3 T = transpose(mat3(view)) * J;
+        mat3 cov2d = transpose(T) * Vrk * T;
+
+        float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
+        float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+        float lambda1 = mid + radius, lambda2 = mid - radius;
+
+        if (lambda2 < 0.0) return;
+        vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
+        vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
+        vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
+
+        vColor = clamp(pos2d.z/pos2d.w + 1.0, 0.0, 1.0) * vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
+        vPosition = position;
+
+        vec2 vCenter = vec2(pos2d) / pos2d.w;
+        gl_Position = vec4(
+            vCenter + position.x * majorAxis / viewport + position.y * minorAxis / viewport,
+            0.0,
+            1.0
+        );
+    }`.trim();
+
+    const fragmentShaderSource = `#version 300 es
+    precision highp float;
+
+    in vec4 vColor;
+    in vec2 vPosition;
+
+    out vec4 fragColor;
+
+    void main () {
+        float A = -dot(vPosition, vPosition);
+        if (A < -4.0) discard;
+        float B = exp(A) * vColor.a;
+        fragColor = vec4(B * vColor.rgb, B);
+    }`.trim();
+
+    // --------------------------------------------------------------------------
+    // 4. Main Runtime
+    // --------------------------------------------------------------------------
+    async function initGaussianViewer() {
+      const params = new URLSearchParams(location.search);
+      let modelUrl = params.get("url") || params.get("model");
+      if (!modelUrl) {
+        // Default to latest reconstructed 3DGS scene
+        modelUrl = "/outputs/scenes/scout_scene_20260920_200503/reconstruction_3dgs.splat";
+      }
+      // If requested PLY and companion .splat exists, prefer .splat for 3x faster network loading
+      if (modelUrl.endsWith(".ply")) {
+        const splatCandidate = modelUrl.replace(/\.ply$/, ".splat");
+        try {
+          const checkHead = await fetch(splatCandidate, { method: "HEAD" });
+          if (checkHead.ok) modelUrl = splatCandidate;
+        } catch (e) {}
+      }
+
+      const modelName = modelUrl.split("/").pop();
+      document.getElementById("hud-model-name").innerText = modelName;
+
+      const canvas = document.getElementById("canvas");
+      const gl = canvas.getContext("webgl2", { antialias: false, powerPreference: "high-performance" });
+      if (!gl) {
+        alert("当前浏览器不支持 WebGL 2.0，无法启动 3DGS 原生高斯泼溅渲染内核！");
+        return;
+      }
+
+      // Shaders & Program
+      const vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, vertexShaderSource);
+      gl.compileShader(vs);
+
+      const fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs, fragmentShaderSource);
+      gl.compileShader(fs);
+
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      gl.useProgram(program);
+
+      gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.ONE, gl.ONE_MINUS_DST_ALPHA, gl.ONE);
+      gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+
+      const u_projection = gl.getUniformLocation(program, "projection");
+      const u_viewport = gl.getUniformLocation(program, "viewport");
+      const u_focal = gl.getUniformLocation(program, "focal");
+      const u_view = gl.getUniformLocation(program, "view");
+
+      // Billboard Quad Vertices
+      const triangleVertices = new Float32Array([-2, -2, 2, -2, 2, 2, -2, 2]);
+      const vertexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, triangleVertices, gl.STATIC_DRAW);
+      const a_position = gl.getAttribLocation(program, "position");
+      gl.enableVertexAttribArray(a_position);
+      gl.vertexAttribPointer(a_position, 2, gl.FLOAT, false, 0, 0);
+
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(gl.getUniformLocation(program, "u_texture"), 0);
+
+      const indexBuffer = gl.createBuffer();
+      const a_index = gl.getAttribLocation(program, "index");
+      gl.enableVertexAttribArray(a_index);
+      gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+      gl.vertexAttribIPointer(a_index, 1, gl.INT, false, 0, 0);
+      gl.vertexAttribDivisor(a_index, 1);
+
+      // Camera setup: default focal length
+      let fx = innerWidth * 1.15;
+      let fy = innerHeight * 1.15;
+      let defaultViewMatrix = [
+        0.9998, 0.0055, 0.0005, 0,
+        0.0005, 0.9815, -0.1913, 0,
+        -0.0055, 0.1913, 0.9815, 0,
+        -0.8, -0.2, -3.5, 1
+      ];
+      let viewMatrix = [...defaultViewMatrix];
+
+      const resize = () => {
+        fx = innerWidth * 1.15;
+        fy = innerHeight * 1.15;
+        gl.uniform2fv(u_focal, new Float32Array([fx, fy]));
+        const proj = getProjectionMatrix(fx, fy, innerWidth, innerHeight);
+        gl.uniform2fv(u_viewport, new Float32Array([innerWidth, innerHeight]));
+        canvas.width = innerWidth;
+        canvas.height = innerHeight;
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniformMatrix4fv(u_projection, false, proj);
+      };
+      window.addEventListener("resize", resize);
+      resize();
+
+      document.getElementById("btn-reset-view").onclick = () => {
+        viewMatrix = [...defaultViewMatrix];
+      };
+
+      // Worker setup
+      const worker = new Worker(
+        URL.createObjectURL(new Blob(["(", createWorker.toString(), ")(self)"], { type: "application/javascript" }))
+      );
+
+      let vertexCount = 0;
+      worker.onmessage = (e) => {
+        if (e.data.texdata) {
+          const { texdata, texwidth, texheight } = e.data;
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, texwidth, texheight, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, texdata);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+
+          // Hide overlay
+          const overlay = document.getElementById("loading-overlay");
+          if (overlay) overlay.style.opacity = "0", setTimeout(() => overlay.remove(), 500);
+        } else if (e.data.depthIndex) {
+          const { depthIndex } = e.data;
+          gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
+          vertexCount = e.data.vertexCount;
+          document.getElementById("hud-splat-count").innerText = vertexCount.toLocaleString() + " 实体高斯";
+        }
+      };
+
+      // Mouse & Touch Controls
+      let startX, startY, isDragging = 0;
+      canvas.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        startX = e.clientX;
+        startY = e.clientY;
+        isDragging = e.button === 2 || e.shiftKey ? 2 : 1;
+      });
+      canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+      window.addEventListener("mouseup", () => { isDragging = 0; });
+
+      window.addEventListener("mousemove", (e) => {
+        if (!isDragging) return;
+        let dx = (e.clientX - startX) / innerWidth;
+        let dy = (e.clientY - startY) / innerHeight;
+        startX = e.clientX;
+        startY = e.clientY;
+
+        let inv = invert4(viewMatrix);
+        if (isDragging === 1) {
+          // Orbit
+          let dist = 3.5;
+          inv = translate4(inv, 0, 0, dist);
+          inv = rotate4(inv, 4.0 * dx, 0, 1, 0);
+          inv = rotate4(inv, -4.0 * dy, 1, 0, 0);
+          inv = translate4(inv, 0, 0, -dist);
+        } else if (isDragging === 2) {
+          // Pan
+          inv = translate4(inv, -3.0 * dx, 3.0 * dy, 0);
+        }
+        viewMatrix = invert4(inv);
+      });
+
+      window.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        let inv = invert4(viewMatrix);
+        let delta = e.deltaY * 0.003;
+        inv = translate4(inv, 0, 0, -delta);
+        viewMatrix = invert4(inv);
+      }, { passive: false });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Space") {
+          viewMatrix = [...defaultViewMatrix];
+        }
+      });
+
+      // Load Data
+      document.getElementById("loading-text").innerText = `正在下载 3DGS 模型资产: ${modelName}...`;
+      const resp = await fetch(modelUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: 无法读取高斯模型文件`);
+      const buffer = await resp.arrayBuffer();
+
+      document.getElementById("loading-text").innerText = `正在解析高斯协方差与空间排序...`;
+      if (modelUrl.endsWith(".ply")) {
+        worker.postMessage({ ply: buffer });
+      } else {
+        worker.postMessage({ buffer });
+      }
+
+      // Render Loop
+      let lastTime = performance.now();
+      let frameCount = 0;
+      let lastFpsUpdate = lastTime;
+
+      function render(now) {
+        requestAnimationFrame(render);
+        frameCount++;
+        if (now - lastFpsUpdate > 500) {
+          const currentFps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+          document.getElementById("hud-fps").innerText = `${currentFps} FPS`;
+          frameCount = 0;
+          lastFpsUpdate = now;
+        }
+
+        gl.uniformMatrix4fv(u_view, false, viewMatrix);
+        const proj = getProjectionMatrix(fx, fy, innerWidth, innerHeight);
+        const viewProj = multiply4(proj, viewMatrix);
+        worker.postMessage({ view: viewProj });
+
+        if (vertexCount > 0) {
+          gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount);
+        }
+      }
+      requestAnimationFrame(render);
+    }
+
+    window.addEventListener("DOMContentLoaded", initGaussianViewer);
+  </script>
+</body>
+</html>
