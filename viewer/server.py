@@ -142,6 +142,7 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
     ply_files = sorted(outputs_dir.glob("**/*.ply"))
     models = []
     category_priority = {
+        "✨ 3D 高斯泼溅 (3D Gaussian Splatting)": -1,
         "🔥 多视角融合点云 (Multi-Stream Fusion)": 0,
         "📹 单视频重建点云 (Single Video)": 1,
         "🧹 滤波去噪点云 (Denoised Cleaned)": 2,
@@ -167,9 +168,13 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             rel_dir = str(ply_path.parent.name)
         stem = ply_path.stem
         fname = ply_path.name
-
+        # 0. 3D Gaussian Splatting (3DGS)
+        if "3dgs" in stem or "splat" in stem:
+            category = "✨ 3D 高斯泼溅 (3D Gaussian Splatting)"
+            tag = "✨ [3DGS 高斯]"
+            name = f"{tag} {stem} ({format_point_count(vertex_count)} 高斯, {size_mb:.1f}MB, {mtime_str})"
         # 1. Multi-Stream / General Fusion
-        if "fusion" in rel_str or "merged" in stem or "fused_" in stem:
+        elif "fusion" in rel_str or "merged" in stem or "fused_" in stem:
             category = "🔥 多视角融合点云 (Multi-Stream Fusion)"
             is_colored = "colored" in stem
             is_full = "full" in stem
@@ -674,8 +679,56 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_video_upload(parsed_url.query)
         if path == "/api/stop":
             return self.handle_stop_stream()
-
+        if path == "/api/convert_to_3dgs":
+            return self.handle_convert_to_3dgs(parsed_url.query)
         self.send_error(404, f"POST endpoint not found: {path}")
+    def handle_convert_to_3dgs(self, query_string: str) -> None:
+        """Convert a given PLY point cloud into standard 3DGS Gaussian PLY & .splat format."""
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        if not model_path_str:
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len > 0:
+                    body = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    model_path_str = body.get("path", "").lstrip("/")
+            except Exception:
+                pass
+
+        if not model_path_str:
+            self.send_error(400, "Missing path parameter")
+            return
+
+        target_ply = ROOT_DIR / model_path_str
+        if not target_ply.is_file():
+            self.send_error(404, f"Target point cloud file not found: {model_path_str}")
+            return
+
+        from scripts.pcd_to_3dgs import convert_point_cloud_to_3dgs
+
+        try:
+            out_ply = target_ply.parent / f"{target_ply.stem}_3dgs.ply"
+            res = convert_point_cloud_to_3dgs(
+                input_path=target_ply,
+                output_path=out_ply,
+                scale_mode="adaptive",
+                base_scale=0.006,
+                thin_factor=0.15,
+                opacity=0.95,
+                sh_degree=0,
+                export_splat=True,
+            )
+            scan_all_ply_models(force=True)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            rel_3dgs_ply = str(out_ply.relative_to(ROOT_DIR))
+            res["viewer_url"] = f"/{rel_3dgs_ply}"
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+        except Exception as e:
+            self.send_error(500, f"3DGS conversion failed: {e}")
+
 
     def handle_offline_models(self) -> None:
         """List all reconstructed 3D point cloud models stored on disk in outputs/."""
