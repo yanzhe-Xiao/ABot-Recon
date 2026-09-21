@@ -112,24 +112,24 @@ def compute_gaussian_scales(
     if scale_mode == "adaptive" and n > 10:
         from scipy.spatial import cKDTree
 
-        # For large point clouds, query k-NN on a representative spatial subset to determine density
         k_query = min(4, n)
-        if n > 200_000:
-            sample_idx = np.random.choice(n, min(n, 100_000), replace=False)
-            tree = cKDTree(pts[sample_idx])
-            dists, _ = tree.query(pts, k=k_query, workers=-1)
+        tree = cKDTree(pts)
+        if n > 2_000_000:
+            chunk_size = 500_000
+            mean_dists = np.empty(n, dtype=np.float32)
+            for i in range(0, n, chunk_size):
+                d_chunk, _ = tree.query(pts[i:i + chunk_size], k=k_query, workers=-1)
+                mean_dists[i:i + chunk_size] = np.mean(d_chunk[:, 1:], axis=1)
         else:
-            tree = cKDTree(pts)
             dists, _ = tree.query(pts, k=k_query, workers=-1)
+            mean_dists = np.mean(dists[:, 1:], axis=1)
 
-        # Average distance to 3 nearest neighbors as local surfel spacing
-        mean_dists = np.mean(dists[:, 1:], axis=1)
-        # Clamp to reasonable bounds: 1mm ~ 30mm
-        s_tangent = np.clip(mean_dists * 1.2, 0.001, 0.030).astype(np.float32)
+        # Surfel tangent radius based on local spacing, clamped to realistic bounds (0.5mm ~ 15mm)
+        s_tangent = np.clip(mean_dists * 1.1, 0.0005, 0.015).astype(np.float32)
     else:
         s_tangent = np.full(n, base_scale, dtype=np.float32)
 
-    s_normal = np.maximum(s_tangent * thin_factor, 0.0005)
+    s_normal = np.maximum(s_tangent * thin_factor, 0.0002).astype(np.float32)
 
     log_s0 = np.log(s_tangent)
     log_s1 = np.log(s_tangent)
@@ -306,6 +306,7 @@ def convert_point_cloud_to_3dgs(
     opacity: float = 0.95,
     sh_degree: int = 0,
     export_splat: bool = True,
+    invert_z: bool = False,
 ) -> dict:
     """
     Convert a point cloud into a 3D Gaussian Splatting representation.
@@ -320,6 +321,7 @@ def convert_point_cloud_to_3dgs(
         opacity: Base opacity alpha in [0, 1].
         sh_degree: 0 (minimal size) or 3 (legacy compatible).
         export_splat: Whether to also export antimatter15 .splat binary file.
+        invert_z: Whether to invert Z-axis coordinates and normal vectors.
 
     Returns:
         Report dictionary with conversion statistics.
@@ -361,6 +363,10 @@ def convert_point_cloud_to_3dgs(
     pts = np.asarray(pcd.points, dtype=np.float32)
     n_pts = len(pts)
 
+    if invert_z:
+        print("  Inverting Z-axis coordinates (Z -> -Z)...")
+        pts[:, 2] = -pts[:, 2]
+
     # 2. Extract or Estimate Normals
     print("[2/5] Resolving surface normals...")
     if not pcd.has_normals() or len(pcd.normals) != n_pts:
@@ -368,9 +374,12 @@ def convert_point_cloud_to_3dgs(
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
-        pcd.orient_normals_consistent_tangent_plane(k=15)
+        center = np.mean(pts, axis=0)
+        pcd.orient_normals_towards_camera_location(center + np.array([0.0, 2.0, 0.0], dtype=np.float32))
         print("  Normals estimated and oriented successfully.")
     normals = np.asarray(pcd.normals, dtype=np.float32)
+    if invert_z:
+        normals[:, 2] = -normals[:, 2]
 
     # 3. Extract and Transform Colors to Spherical Harmonics (Degree 0 DC)
     print("[3/5] Computing Spherical Harmonics (Degree 0 DC colors)...")
@@ -492,6 +501,9 @@ def parse_args():
     parser.add_argument(
         "--no-splat", action="store_true", help="Do not generate companion .splat file"
     )
+    parser.add_argument(
+        "--invert-z", action="store_true", help="Invert Z coordinates and flip normal Z before conversion"
+    )
     return parser.parse_args()
 
 
@@ -507,6 +519,7 @@ def main():
         opacity=args.opacity,
         sh_degree=args.sh_degree,
         export_splat=not args.no_splat,
+        invert_z=args.invert_z,
     )
 
 

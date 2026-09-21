@@ -417,6 +417,7 @@
     <a href="/gaussian.html" target="_blank" style="margin-left:auto; text-decoration:none; display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; padding:5px 14px; border-radius:20px; background:linear-gradient(135deg, rgba(236,72,153,0.35), rgba(168,85,247,0.45)); color:#fdf2f8; border:1px solid rgba(236,72,153,0.6); box-shadow:0 2px 12px rgba(236,72,153,0.35); transition:all 0.2s;">
       <span>✨ 3DGS 原生高斯漫游器 ↗</span>
     </a>
+  </div>
 
   <!-- 侧边交互控制器 -->
   <div class="control-panel">
@@ -748,6 +749,7 @@
     let allColors = [];
 
     let loadedTrajectoryMatrices = [];
+    let loadedTrajectoryPoints = [];
     let currentVideoPath = null;
     let videoTotalFrames = 0;
     let hudPlayInterval = null;
@@ -1145,6 +1147,7 @@
     async function loadTrajectory(url) {
       trajectoryGroup.clear();
       loadedTrajectoryMatrices = [];
+      loadedTrajectoryPoints = [];
 
       let trajUrl = null;
 
@@ -1226,10 +1229,11 @@
         }
 
         if (points.length > 0) {
+          loadedTrajectoryPoints = points;
           const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
           const lineMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, linewidth: 2.5 });
-          const line = new THREE.Line(lineGeo, lineMat);
-          trajectoryGroup.add(line);
+          trajectoryLine = new THREE.Line(lineGeo, lineMat);
+          trajectoryGroup.add(trajectoryLine);
         }
       } catch (err) {
         console.warn("Failed to load trajectory:", err);

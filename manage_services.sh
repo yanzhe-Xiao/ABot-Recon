@@ -193,8 +193,9 @@ start_8088() {
     echo -e "       Python: ${PYTHON_BIN}"
     echo -e "       Log   : ${LOG_FILE_8088}"
 
-    nohup "$PYTHON_BIN" viewer/server.py --host "$host" --port "$port" --device "$device" > "$LOG_FILE_8088" 2>&1 &
+    setsid "$PYTHON_BIN" viewer/server.py --host "$host" --port "$port" --device "$device" > "$LOG_FILE_8088" 2>&1 &
     local pid=$!
+    disown "$pid" 2>/dev/null || true
     echo "$pid" > "$PID_FILE_8088"
 
     # 等待验证启动并完成 GPU 预热 (最多等待 15 秒)

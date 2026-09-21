@@ -23,6 +23,12 @@ import cv2
 import numpy as np
 import open3d as o3d
 import torch
+import struct
+try:
+    from scipy.spatial import cKDTree
+except ImportError:
+    cKDTree = None
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -31,6 +37,8 @@ from viewer.stream_backend import OnlineReconstructionEngine
 
 # In-memory cache for colors.pt video stream tensors (max 8 models)
 _COLORS_CACHE: Dict[str, torch.Tensor] = {}
+# In-memory cache for dynamic replay buffers (max 6 models)
+_REPLAY_CACHE: Dict[str, bytes] = {}
 
 def load_colors_tensor(dir_or_file: Path) -> Optional[torch.Tensor]:
     """Load colors.pt from directory or parent directory with caching."""
@@ -111,13 +119,18 @@ def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
         parent / f"{stem}_poses.npy",
         parent / f"{stem}_camera_poses.npy",
         parent / f"{stem}.poses.npy",
+        parent / "camera_poses.npy",
+        parent / "camera_poses_loop.npy",
+        parent / "camera_poses_noloop.npy",
+        parent / "robot_poses.npy",
     ]
-    if "reconstruction" in stem:
-        candidates.extend([
-            parent / "camera_poses.npy",
-            parent / "camera_poses_loop.npy",
-            parent / "camera_poses_noloop.npy",
-        ])
+    if parent.is_dir():
+        for p in parent.glob("*-robot_poses.npy"):
+            candidates.append(p)
+        for p in parent.glob("*camera_poses*.npy"):
+            candidates.append(p)
+        for p in parent.glob("*poses*.npy"):
+            candidates.append(p)
 
     for c in candidates:
         if c.is_file():
@@ -127,6 +140,118 @@ def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
             except ValueError:
                 pass
     return None
+
+def generate_replay_buffer(target_path: Path, stride: int = 4, conf_thresh: float = 0.1) -> bytes:
+    """Generate binary buffer containing per-frame points and colors for dynamic mapping playback."""
+    target_path = target_path.resolve()
+    model_dir = target_path if target_path.is_dir() else target_path.parent
+
+    wp_path = model_dir / "world_points.pt"
+    cp_path = model_dir / "colors.pt"
+    conf_path = model_dir / "confidence.pt"
+
+    frame_counts: List[int] = []
+    all_xyz: List[np.ndarray] = []
+    all_rgb: List[np.ndarray] = []
+
+    if wp_path.is_file() and cp_path.is_file():
+        wp = torch.load(wp_path, map_location="cpu", weights_only=False)
+        cp = torch.load(cp_path, map_location="cpu", weights_only=False)
+        conf = torch.load(conf_path, map_location="cpu", weights_only=False) if conf_path.is_file() else None
+
+        total_frames = min(len(wp), len(cp))
+        step = max(1, stride)
+        for i in range(total_frames):
+            w_f = wp[i, ::step, ::step].reshape(-1, 3).numpy()
+            c_f = cp[i, ::step, ::step].reshape(-1, 3).numpy()
+            valid = np.isfinite(w_f).all(axis=-1)
+            if conf is not None:
+                cf = conf[i, ::step, ::step].reshape(-1).numpy()
+                valid &= (cf >= conf_thresh)
+            xyz_v = w_f[valid].astype(np.float32)
+            rgb_v = c_f[valid].astype(np.uint8)
+            frame_counts.append(len(xyz_v))
+            all_xyz.append(xyz_v)
+            all_rgb.append(rgb_v)
+    else:
+        # Fallback to PLY file + poses
+        ply_path = target_path if target_path.is_file() and target_path.suffix.lower() == ".ply" else model_dir / "reconstruction.ply"
+        if not ply_path.is_file():
+            ply_files = list(model_dir.glob("*.ply"))
+            if ply_files:
+                ply_path = ply_files[0]
+            else:
+                raise FileNotFoundError(f"No PLY file found in {model_dir}")
+
+        pcd = o3d.io.read_point_cloud(str(ply_path))
+        pts = np.asarray(pcd.points, dtype=np.float32)
+        if len(pcd.colors) == len(pts):
+            c_arr = np.asarray(pcd.colors, dtype=np.float32)
+            if c_arr.max() <= 1.01:
+                colors = (c_arr * 255.0).clip(0, 255).astype(np.uint8)
+            else:
+                colors = c_arr.clip(0, 255).astype(np.uint8)
+        else:
+            colors = np.full((len(pts), 3), 200, dtype=np.uint8)
+
+        # Find poses
+        poses = None
+        traj_url = find_trajectory_for_ply(ply_path)
+        if traj_url:
+            traj_path = ROOT_DIR / traj_url.lstrip("/")
+            if traj_path.is_file():
+                try:
+                    loaded = np.load(traj_path).astype(np.float32)
+                    if loaded.ndim == 3 and loaded.shape[1:] == (4, 4):
+                        poses = loaded
+                    elif loaded.ndim == 2 and loaded.shape[1] == 16:
+                        poses = loaded.reshape(-1, 4, 4)
+                except Exception:
+                    pass
+
+        # Downsample if too many points (> 1.2M points)
+        if len(pts) > 1200000:
+            sub_step = int(np.ceil(len(pts) / 1200000))
+            pts = pts[::sub_step]
+            colors = colors[::sub_step]
+
+        if poses is not None and len(poses) > 0 and cKDTree is not None:
+            total_frames = len(poses)
+            cam_centers = poses[:, :3, 3]
+            tree = cKDTree(cam_centers)
+            _, assignments = tree.query(pts, workers=-1)
+            sort_idx = np.argsort(assignments)
+            pts = pts[sort_idx]
+            colors = colors[sort_idx]
+            counts = np.bincount(assignments, minlength=total_frames)
+            frame_counts = counts.tolist()
+            all_xyz = [pts]
+            all_rgb = [colors]
+        else:
+            total_frames = len(poses) if poses is not None else 60
+            chunk_size = int(np.ceil(len(pts) / total_frames))
+            frame_counts = []
+            for i in range(total_frames):
+                s = i * chunk_size
+                e = min((i + 1) * chunk_size, len(pts))
+                frame_counts.append(max(0, e - s))
+            all_xyz = [pts]
+            all_rgb = [colors]
+
+    if all_xyz:
+        xyz_arr = np.concatenate(all_xyz, axis=0)
+        rgb_arr = np.concatenate(all_rgb, axis=0)
+    else:
+        xyz_arr = np.zeros((0, 3), dtype=np.float32)
+        rgb_arr = np.zeros((0, 3), dtype=np.uint8)
+
+    total_points = len(xyz_arr)
+    header = struct.pack("<4sIII", b"ABTR", 1, total_frames, total_points)
+    fc_bytes = np.array(frame_counts, dtype=np.uint32).tobytes()
+    xyz_bytes = xyz_arr.astype(np.float32).tobytes()
+    rgb_bytes = rgb_arr.astype(np.uint8).tobytes()
+
+    return header + fc_bytes + xyz_bytes + rgb_bytes
 
 def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
     """Scan outputs/ directory dynamically with 3-second cache to prevent redundant disk I/O."""
@@ -659,6 +784,8 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_sse_stream(parsed_url.query)
         if path == "/api/video_info":
             return self.handle_video_info(parsed_url.query)
+        if path == "/api/replay_pointcloud":
+            return self.handle_replay_pointcloud(parsed_url.query)
         if path == "/api/frame":
             return self.handle_video_frame(parsed_url.query)
         if path == "/api/trajectory_info":
@@ -807,10 +934,57 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                     "path": model_path_str,
                 }
 
+        model_dir = target_path if target_path.is_dir() else target_path.parent
+        has_wp = (model_dir / "world_points.pt").is_file() and (model_dir / "colors.pt").is_file()
+        traj_url = find_trajectory_for_ply(target_path) if target_path.is_file() and target_path.suffix.lower() == ".ply" else None
+        has_replay = has_wp or (traj_url is not None)
+        info["has_replay"] = has_replay
+        info["replay_url"] = f"/api/replay_pointcloud?path={urllib.parse.quote(model_path_str)}"
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(info).encode("utf-8"))
+
+    def handle_replay_pointcloud(self, query_string: str) -> None:
+        """Return binary stream containing per-frame point cloud for dynamic mapping replay."""
+        global _REPLAY_CACHE
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        stride = int(params.get("stride", ["4"])[0])
+        conf_thresh = float(params.get("confidence_threshold", ["0.1"])[0])
+
+        if not model_path_str:
+            self.send_error(400, "Missing path parameter")
+            return
+
+        target_path = ROOT_DIR / model_path_str
+        if not target_path.exists():
+            self.send_error(404, f"File or directory not found: {model_path_str}")
+            return
+
+        cache_key = f"{model_path_str}_{stride}_{conf_thresh}"
+        if cache_key in _REPLAY_CACHE:
+            payload = _REPLAY_CACHE[cache_key]
+        else:
+            try:
+                payload = generate_replay_buffer(target_path, stride=stride, conf_thresh=conf_thresh)
+                if len(_REPLAY_CACHE) > 6:
+                    _REPLAY_CACHE.pop(next(iter(_REPLAY_CACHE)))
+                _REPLAY_CACHE[cache_key] = payload
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_error(500, f"Failed to generate replay pointcloud: {e}")
+                return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def handle_trajectory_info(self, query_string: str) -> None:
         """Return trajectory availability and URL for a given PLY model."""
