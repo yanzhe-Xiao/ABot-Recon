@@ -619,10 +619,19 @@ class MultiSessionReconstructionManager:
         worker.active_sessions.add(session_id)
 
         # Create fresh isolated paged manager from selected worker's template within device context
-        cuda_ctx = torch.cuda.device(worker.device) if worker.device.type == "cuda" else contextlib.nullcontext()
-        with cuda_ctx:
+        try:
+            cuda_ctx = torch.cuda.device(worker.device) if worker.device.type == "cuda" else contextlib.nullcontext()
+            with cuda_ctx:
+                paged_mgr = copy.deepcopy(worker.paged_template)
+                if hasattr(paged_mgr, "reset"):
+                    paged_mgr.reset()
+        except Exception:
             paged_mgr = copy.deepcopy(worker.paged_template)
-            paged_mgr.reset()
+            if hasattr(paged_mgr, "reset"):
+                try:
+                    paged_mgr.reset()
+                except Exception:
+                    pass
 
         effective_interval = dynamic_interval if dynamic_interval is not None else self.dynamic_interval
 
@@ -803,12 +812,17 @@ class MultiSessionReconstructionManager:
             result["thumbnail"] = thumb_b64
 
         if has_subscribers:
-            if points_xyz_list is None:
-                points_xyz_list = valid_pts.tolist()
-                points_rgb_list = valid_rgb.tolist()
+            # Subsample preview points for real-time web observers (cap at 2048 pts to keep JSON <80KB & serialization <2ms)
+            if len(valid_pts) > 2048:
+                step = int(np.ceil(len(valid_pts) / 2048.0))
+                sub_pts = valid_pts[::step]
+                sub_rgb = valid_rgb[::step]
+            else:
+                sub_pts = valid_pts
+                sub_rgb = valid_rgb
             broadcast_payload = dict(result)
-            broadcast_payload["points_xyz"] = points_xyz_list
-            broadcast_payload["points_rgb"] = points_rgb_list
+            broadcast_payload["points_xyz"] = sub_pts.tolist()
+            broadcast_payload["points_rgb"] = sub_rgb.tolist()
             broadcast_payload["thumbnail"] = thumb_b64
             self.broadcast_to_subscribers(session.session_id, broadcast_payload)
 
@@ -1734,8 +1748,15 @@ async def websocket_viewer(
 
     try:
         while True:
+            # Drain stale frames if client is slow to keep real-time latency minimal
+            while q.qsize() > 1:
+                try:
+                    q.get_nowait()
+                except Exception:
+                    break
             msg = await q.get()
-            await websocket.send_text(json.dumps(msg))
+            text = await asyncio.to_thread(json.dumps, msg)
+            await websocket.send_text(text)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:

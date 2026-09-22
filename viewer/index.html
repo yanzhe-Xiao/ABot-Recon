@@ -480,8 +480,8 @@
         <div class="btn-group">
           <select id="video-point-stride" style="font-size:11px; padding:4px 6px;">
             <option value="2" selected>Stride 2 (高清推荐)</option>
-            <option value="1">Stride 1 (极限致密)</option>
             <option value="4">Stride 4 (快速预览)</option>
+            <option value="1">Stride 1 (极限致密)</option>
           </select>
           <select id="video-frame-stride" style="font-size:11px; padding:4px 6px;">
             <option value="1" selected>逐帧计算 (1x)</option>
@@ -2451,8 +2451,8 @@
         }
 
         const sceneId = sceneInput.value.trim() || selectedVideoFile.name.replace(/\.[^/.]+$/, '');
-        const pointStride = document.getElementById('video-point-stride').value;
-        const frameStride = document.getElementById('video-frame-stride').value;
+        const pointStride = document.getElementById('video-point-stride').value || '2';
+        const frameStride = document.getElementById('video-frame-stride').value || '1';
         const voxelSize = document.getElementById('video-voxel-size') ? document.getElementById('video-voxel-size').value : '0.003';
         const autoFuse = document.getElementById('chk-video-auto-fuse').checked;
         const dynamicFilter = document.getElementById('chk-video-dynamic-filter').checked;
