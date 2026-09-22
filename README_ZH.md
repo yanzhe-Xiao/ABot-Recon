@@ -24,98 +24,231 @@
 
 > **一句话介绍：** ABot-Recon 仅使用固定的 12 帧局部上下文处理超长视频流，将当前帧几何与相邻帧相对位姿逐步组合为全局重建，无需持久化的学习式长程记忆。
 
-## 📣 最新动态
+---
 
-- **2026-08-31：** 感谢 Hugging Face 团队的支持，ABot-Recon [在线 Demo](https://huggingface.co/spaces/acvlab/abot-recon-streaming-3d) 现已上线，欢迎体验！
+## 📣 最新功能与系统升级亮点
 
-## 为什么使用局部上下文？
+- **原生 WebGL2 3DGS 渲染器：** 在 8088 网页可视化端内置基于 WebGL2 的 3D Gaussian Splatting 光栅化着色器，无需第三方复杂依赖即可在浏览器中流畅交互渲染百万级高斯椭球，支持点云与 3DGS 视角平滑切换。
+- **点云一键闭式转 3DGS 模型 (`scripts/pcd_to_3dgs.py`)：** 无需耗时数小时的神经网络反向传播训练，基于 KNN 局部协方差与球谐函数瞬时将重建点云闭式转换为标准 3DGS PLY 格式。
+- **8090 实时视频流建图引擎与 8088 观察者协同桥梁：** 支持 WebSocket (`/ws/viewer`) 与 SSE (`/api/stream/live`) 观察者广播通道，外部推流时网页端零延迟实时渲染相机视锥运动轨迹与增量生长点云。
+- **动态物体实时语义过滤 (YOLO-seg)：** 集成 YOLO 语义分割网络，推流过程中动态剔除行人、车辆等运动物体，保证背景地图纯净无拖影。
+- **Method 2 多流增量场景融合与点云优化：** 支持多台机器人/多段视频协同建图，采用 Sim(3) 位姿图优化 (PGO)、多尺度 VGICP 精细配准与统计滤波 (SOR) 消除重叠伪影。
 
-现有长时程流式重建方法通常通过更加复杂的机制保存并融合长程状态。ABot-Recon 选择了一条严格局部的路径，在每个时刻解决相同且有界的预测问题：
+---
 
-- 缓存此前 11 帧的 KV 特征；
-- 在当前相机坐标系中预测点图 $P_i$；
-- 估计与前一帧之间的相对位姿 $T_{i-1\leftarrow i}$；
-- 通过逐步组合相对位姿恢复全局轨迹和点云。
+## 🚀 迁移部署全流程指南 (Migration & Deployment Guide)
 
-因此，模型状态占用和单帧计算量均不随已处理序列长度增长。轻量级运动—视觉旋转精修器与组合感知位姿损失进一步抑制局部位姿在长时程组合中的误差累积。
+本指南面向全新服务器环境的从零部署与现有服务的无缝迁移。
 
-## 结果概览
+### 1. 硬件与系统环境要求
 
-<p align="center">
-  <img src="benchmark_comparison_transparent.png" width="82%" alt="ABot-Recon 在 Oxford Spires 和 KITTI-02 上的结果对比">
-</p>
+| 维度 | 最低配置要求 | 生产推荐配置 |
+|---|---|---|
+| **操作系统** | Linux (Ubuntu 20.04 / 22.04 LTS x86_64) | Ubuntu 22.04 LTS |
+| **GPU 算力** | NVIDIA GPU (Compute Capability $\ge 8.0$：RTX 3090 / 4090 / A10 / A100 / H100) | NVIDIA RTX 4090 (24GB) 或 A100 (40GB/80GB) |
+| **显存 (VRAM)** | 8 GB (仅运行离线视频推理) | 16 GB ~ 24 GB (同时运行 8090 实时推流 + YOLO 动态分割 + 8088 WebGL2 3DGS 可视化) |
+| **CPU / 内存** | 8 核心 CPU，16 GB 内存 | 16+ 核心 CPU，32 GB ~ 64 GB 内存 |
+| **磁盘存储** | $\ge 25\text{ GB}$ 可用 SSD 空间 (模型权重 + 缓存 + 重建产物) | NVMe 高速 SSD $\ge 100\text{ GB}$ |
+| **软件环境** | Python 3.10 ~ 3.11, CUDA 12.1 | Python 3.11, CUDA 12.1, PyTorch 2.5.1 |
 
-| 评测项目 | 结果 | 设置 |
-|---|---:|---|
-| Oxford Spires 相机位姿 | ATE **4.35 m**，RPE-R **0.12°** | 仅流式模型，不使用回环 |
-| Oxford Spires 稠密重建 | CD **1.37 m**，F1 **91.81%** | F1 阈值 $\tau=4$ m |
-| KITTI-02 流式效率 | **24.45 FPS**，**6.71 GiB** | 504×280，NVIDIA H100，不计输入存储 |
+---
 
-论文还报告了 KITTI、Oxford Spires 和 VBR 上的相机位姿结果，以及 7Scenes、TUM-Dynamic 和 Oxford Spires 上的稠密重建结果。
+### 2. 环境搭建与依赖安装
 
-## 安装
-
-发布配置面向 Linux、Python 3.10 及以上版本、PyTorch 2.5.1 和 CUDA 12.1。发布环境在 NVIDIA A100 上完成验证，论文中的运行效率则在 NVIDIA H100 上测试。
-
+#### 第一步：创建 Conda 独立虚拟环境
 ```bash
 conda create -n abot-recon python=3.11 -y
 conda activate abot-recon
-
-pip install torch==2.5.1 torchvision==0.20.1 \
-  --index-url https://download.pytorch.org/whl/cu121
-pip install -e .
 ```
 
-### 推荐加速组件
+#### 第二步：安装 PyTorch 与 CUDA 12.1 运行时
+```bash
+pip install torch==2.5.1 torchvision==0.20.1 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
 
-若环境中安装了 FlashInfer，ABot-Recon 将使用其分页 KV-cache 算子；否则自动回退至 PyTorch SDPA。编译 cuRoPE 可进一步加速旋转位置编码。
+#### 第三步：安装项目全量依赖
+通过项目根目录下的 [requirements.txt](requirements.txt) 或 editable package 一键安装：
 
 ```bash
+# 方式 A：通过 requirements.txt 安装 (服务器部署推荐)
+pip install -r requirements.txt
+
+# 方式 B：通过包管理安装全量扩展
+pip install -e ".[all]"
+```
+
+#### 第四步：编译底层硬件加速扩展 (FlashInfer & cuRoPE)
+ABot-Recon 深度利用 FlashInfer 的分页 KV-cache 显存加速机制与自定义 CUDA 旋转位置编码 (cuRoPE)：
+
+```bash
+# 1. 安装 FlashInfer 分页 KV-cache 库
 pip install flashinfer-python
 flashinfer show-config
 
+# 2. 编译 cuRoPE 硬件加速算子
 cd abot_recon/modeling/pi3/models/curope
 pip install ninja
 python setup.py build_ext --inplace
 cd -
 ```
 
-## 模型权重
+---
 
-模型权重已发布至 [Hugging Face](https://huggingface.co/acvlab/ABot-Recon) 和 [ModelScope 魔搭](https://modelscope.cn/models/amap_cvlab/ABot-Recon)。Python API 和演示脚本默认从 Hugging Face 自动下载权重并复用本地缓存。离线推理时，可手动下载并放置在：
+### 3. 模型权重与资产部署
+
+系统依赖的主干权重与可选辅助模型分布如下：
 
 ```text
-checkpoints/abot_recon.safetensors
+ABot-Recon/
+├── checkpoints/
+│   ├── abot_recon.safetensors         # [核心必需] ABot-Recon 重建大模型 (~4.0 GB)
+│   └── loop/                          # [可选] 回环检测与特征检索权重
+│       ├── dino_salad.ckpt            # (~352 MB)
+│       └── dinov2_vitb14_pretrain.pth # (~346 MB)
+├── yolo11m-seg.pt                     # [可选] 动态物体语义分割模型 (~45 MB)
+└── yolo11n-seg.pt                     # [可选] 轻量级动态分割模型 (~6 MB)
 ```
 
-## 快速开始
+#### 下载模型权重
 
-基础模型不依赖回环相关软件包或权重。输入图像按字典序排序，因此建议使用补零后的帧文件名，例如 `000001.jpg`、`000002.jpg`。
+* **ABot-Recon 核心权重 (~4.0 GB)**：
+  - **Hugging Face**：[acvlab/ABot-Recon](https://huggingface.co/acvlab/ABot-Recon)
+  - **ModelScope 魔搭社区**：[amap_cvlab/ABot-Recon](https://modelscope.cn/models/amap_cvlab/ABot-Recon)
+
+  ```bash
+  mkdir -p checkpoints
+
+  # 使用 huggingface-cli 下载
+  huggingface-cli download acvlab/ABot-Recon abot_recon.safetensors --local-dir checkpoints --local-dir-use-symlinks False
+
+  # 或使用 ModelScope 下载 (国内网络极速推荐)
+  python -c "from modelscope import snapshot_download; snapshot_download('amap_cvlab/ABot-Recon', local_dir='checkpoints')"
+  ```
+
+* **可选回环检索权重 (~700 MB)**：
+  ```bash
+  python scripts/download_loop_assets.py --output-dir checkpoints/loop
+  ```
+
+* **可选 YOLO-seg 动态过滤模型 (~45 MB)**：
+  ```bash
+  # 首次使用时自动下载，亦可手动预热下载：
+  python -c "from ultralytics import YOLO; YOLO('yolo11m-seg.pt')"
+  ```
+
+> [!TIP]
+> **关于网络代理环境配置**：如果目标服务器下载 Hugging Face 权重时遇到网络受限，可配置网络代理环境（如执行 `proxy_download` 或配置 `export HTTP_PROXY=... HTTPS_PROXY=...`），或直接通过 ModelScope 国内镜像源下载。
+
+---
+
+### 4. 双服务架构与一键运维管理
+
+ABot-Recon 采用前后端分离的双服务协同架构：
+
+```
+┌────────────────────────────────────────────────────────┐
+│               ABot-Recon 双服务协同架构                │
+├─────────────────────────┬──────────────────────────────┤
+│  8088 端口：Web 可视化服务端 │  8090 端口：在线推流建图服务端 │
+│  - 原生 WebGL2 3DGS 渲染器 │  - 多会话在线流式 3D 重建    │
+│  - 点云/轨迹三维交互视窗   │  - WebSocket / SSE 广播通道  │
+│  - 跨端口代理 8090 数据    │  - YOLO 动态物体过滤         │
+│  - 场景模型统一管理与切换  │  - 多流增量配准与融合        │
+└─────────────────────────┴──────────────────────────────┘
+```
+
+通过内置的一键服务管理脚本 [`manage_services.sh`](manage_services.sh) 统一调度后台进程，已自动集成 `setsid` 与进程守护，防止 SSH 断开导致服务退出。
+
+#### 服务管理常用命令
 
 ```bash
-python demo.py \
-  --image-dir examples/images \
-  --output-dir outputs/demo \
-  --attention-backend auto \
-  --no-loop-closure
+# 1. 一键启动所有服务 (同时启动 8088 与 8090)
+./manage_services.sh start all
+
+# 2. 查看各服务运行状态、监听端口与 PID
+./manage_services.sh status
+
+# 3. 实时滚动查看服务日志
+./manage_services.sh log 8088    # 查看 8088 Web 可视化日志
+./manage_services.sh log 8090    # 查看 8090 推流计算引擎日志
+
+# 4. 重启或停止服务
+./manage_services.sh restart all
+./manage_services.sh stop all
 ```
 
-该最小示例对输入序列执行一次因果前向推理，并保存原始相机轨迹、相邻帧相对位姿、局部点图、置信度图和运行元数据。对于包含重访区域的序列，轨迹精修方式见[可选回环](#可选回环)。
+#### 防火墙与 Nginx 反向代理配置
 
-常用输出选项：
+若服务器开启了防火墙，请放行 **8088** 与 **8090** 端口：
+```bash
+sudo ufw allow 8088/tcp
+sudo ufw allow 8090/tcp
+```
 
-| 选项 | 作用 |
-|---|---|
-| `--save-world-points` | 使用最终轨迹变换局部点图并保存全局点云 |
-| `--no-save-local-points` | 不保存逐帧局部点图 |
-| `--no-save-confidence` | 不保存置信度图 |
-| `--confidence-threshold T` | 屏蔽置信度低于 `[0, 1]` 区间内阈值 `T` 的点 |
-| `--loop-closure` / `--no-loop-closure` | 开启或关闭可选回环优化；默认开启 |
-| `--start`、`--end`、`--stride` | 从排序后的输入流中选择帧 |
-| `--dense-stride N` | 估计每个选中帧的位姿，但每隔 `N` 帧保存一次稠密输出 |
-| `--max-frames N` | 设置支持的最大序列长度，默认为 `22000` |
+若配置 **Nginx** 反向代理并启用 HTTPS，务必开启 WebSocket 握手穿透配置：
+```nginx
+location /ws/ {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400s;
+}
+```
 
-### Python API
+---
+
+### 5. 实时摄像头与视频推流在线建图
+
+使用推流工具脚本 [`scripts/stream_camera_to_8090.py`](scripts/stream_camera_to_8090.py)，可将本地 USB 摄像头、RTSP 网络视频流或离线视频实时推送到 8090 服务端：
+
+```bash
+# 1. 采集本机 USB 摄像头 (设备编号 0) 边拍边建
+python scripts/stream_camera_to_8090.py --source 0 --session-id office_cam --fps 12
+
+# 2. 接收网络 RTSP / IP 摄像头视频流
+python scripts/stream_camera_to_8090.py --source "rtsp://admin:password@192.168.1.100:554/stream" --session-id robot_camera
+
+# 3. 模拟真实拍摄帧率推送本地已有视频
+python scripts/stream_camera_to_8090.py --source data/mine/video1.mp4 --session-id video1_stream --fps 15
+```
+
+**实时在线观察**：打开浏览器访问 `http://<服务器IP>:8088`，点击【8090 连接的 Stream 视频流】选项卡，在下拉列表中选择对应的会话 ID，即可在浏览器中实时看到相机视锥运动轨迹与增量生长的三维点云。
+
+---
+
+### 6. 点云转 3DGS 高斯模型与 WebGL2 原生渲染
+
+使用闭式解算工具 [`scripts/pcd_to_3dgs.py`](scripts/pcd_to_3dgs.py)，可将任何点云重建结果转换为标准 3D Gaussian Splatting PLY 模型：
+
+```bash
+python scripts/pcd_to_3dgs.py \
+  --input outputs/demo/reconstruction.ply \
+  --output outputs/demo/reconstruction_3dgs.ply \
+  --knn 16 \
+  --opacity 0.85
+```
+
+- **WebGL2 网页交互渲染**：在 `http://<服务器IP>:8088` 界面中选择加载生成的 3DGS PLY 文件，点击顶部的 **3DGS (Splats)** 开关，即可享受基于椭球光栅化的高保真连续三维高斯渲染，支持实时调节椭球缩放与透明度。
+
+---
+
+### 7. 多视角与多流场景融合管线 (Method 2)
+
+针对多机协同或多次扫图场景，利用 Method 2 融合工具消除各会话间的尺度漂移与局部变形：
+
+```bash
+python scripts/match_and_fuse_method2.py \
+  --models outputs/stream1/reconstruction.ply outputs/stream2/reconstruction.ply \
+  --output-dir outputs/fused_scene \
+  --pgo \
+  --sor
+```
+
+---
+
+## 💻 离线推理与 Python API
 
 ```python
 from pathlib import Path
@@ -132,73 +265,13 @@ model = ABotRecon.from_pretrained(
 
 result = model.infer(images)
 
-trajectory = result.camera_poses
-relative_poses = result.relative_poses
-local_points = result.local_points
-confidence = result.confidence
+trajectory = result.camera_poses      # 相机轨迹位姿
+relative_poses = result.relative_poses # 相邻帧相对位姿
+local_points = result.local_points     # 逐帧局部点图
+confidence = result.confidence         # 深度置信度
 ```
 
-权重只会下载一次，后续直接从 Hugging Face 缓存加载。离线推理时，将仓库 ID 替换为本地权重路径即可。
-
-设置 `output_world_points=True` 可返回由最终轨迹变换后的世界坐标系点图；若仅需部分帧的稠密几何，可使用 `dense_output_indices`。
-
-## 可选回环
-
-学习式模型本身不依赖回环。当序列中存在有效的重复访问时，可选后端使用 DINOv2-SALAD 描述子检索候选帧对，由 ABot-Recon 预测相对位姿约束，并通过稀疏位姿图优化精修轨迹。
-
-安装可选依赖并下载检索模型：
-
-```bash
-pip install -e ".[loop]"
-python scripts/download_loop_assets.py --output-dir checkpoints/loop
-```
-
-文件结构应为：
-
-```text
-checkpoints/
-├── abot_recon.safetensors
-└── loop/
-    ├── dino_salad.ckpt
-    └── dinov2_vitb14_pretrain.pth
-```
-
-启用回环进行推理：
-
-```bash
-python demo.py \
-  --image-dir examples/images \
-  --output-dir outputs/demo_loop \
-  --attention-backend auto \
-  --loop-closure
-```
-
-启用回环后，`camera_poses` 保存精修后的轨迹，`camera_poses_noloop` 则保留原始流式预测。
-
-## 输出文件
-
-实际生成的文件取决于所选择的输出选项：
-
-```text
-outputs/demo/
-├── camera_poses.npy
-├── relative_poses.npy
-├── camera_poses_noloop.npy
-├── relative_poses_noloop.npy
-├── camera_poses_loop.npy       # 仅在启用回环时生成
-├── relative_poses_loop.npy     # 仅在启用回环时生成
-├── local_points.pt             # 默认生成
-├── world_points.pt             # 使用 --save-world-points 时生成
-├── colors.pt                   # 与点图对齐的 RGB
-├── confidence.pt               # 默认生成
-├── confidence_mask.pt          # 默认生成
-└── metadata.json
-```
-
-局部点图保留在各自对应的相机坐标系中；世界坐标系点云则使用最终选定的轨迹生成。
-
-### 可视化
-
+导出带颜色的稠密点云 PLY 与俯视轨迹图：
 ```bash
 python scripts/export_reconstruction_ply.py \
   --poses outputs/demo/camera_poses.npy \
@@ -208,65 +281,67 @@ python scripts/export_reconstruction_ply.py \
   --bev-output outputs/demo/trajectory_bev.png
 ```
 
-该命令会生成 RGB 点云 PLY，以及一张独立的 BEV 轨迹图；轨迹不会写入 PLY。
+---
 
-## 评测
+## 🛠️ 迁移与部署排错排查清单 (Troubleshooting)
 
-相机位姿与稠密重建评测协议维护在 `eval` 分支：
+| 异常现象 | 可能原因 | 解决办法 |
+|---|---|---|
+| **CUDA Out of Memory (显存溢出)** | 序列过长或显存不足以同时支撑推理与分割 | 1. 启动时增加 `--dense-stride 2` 或推流时增加 `point_stride=4`<br>2. 临时关闭动态过滤：不传 `--dynamic-filter`<br>3. 降低推流分辨率（如 504×280） |
+| **FlashInfer ImportError 或 ABI 冲突** | FlashInfer 编译环境与当前 PyTorch/CUDA 不兼容 | 启动时添加 `--attention-backend sdpa`，系统将自动回退到 PyTorch 原生高效率注意力机制 |
+| **cuRoPE 编译失败** | 缺少 `ninja` 或 GCC 编译器版本过低 | 执行 `pip install ninja` 并检查 `gcc --version` ($\ge 9.0$)。cuRoPE 为性能加速项，编译失败会自动安全回退 |
+| **8088 / 8090 端口已被占用** | 残留的旧后台进程未彻底退出 | 执行 `./manage_services.sh stop all` 或通过 `lsof -i :8088` 查询 PID 后执行 `kill -9 <PID>` 释放端口 |
+| **8090 推流 WebSocket 无法连接或立即断开** | 反向代理未正确升级 WebSocket 握手协议 | 在 Nginx 配置文件中补齐 `proxy_set_header Upgrade $http_upgrade;` 与 `proxy_set_header Connection "upgrade";` |
+| **Hugging Face 权重下载缓慢或超时** | 跨境网络不稳定或受限 | 使用 ModelScope 镜像源下载：`python -c "from modelscope import snapshot_download; snapshot_download('amap_cvlab/ABot-Recon', local_dir='checkpoints')"` |
+
+---
+
+## 🧪 单元与集成测试
 
 ```bash
-git switch eval
-```
-
-该分支包含数据集准备、第三方权重、评测命令和指标汇总说明。为遵循论文协议，稠密重建评测不使用回环。
-
-## 测试
-
-```bash
+# 执行基础单元测试
 pytest -q
-```
 
-CUDA 专项测试和真实权重集成测试可分别运行：
-
-```bash
+# 验证 cuRoPE CUDA 算子与 PyTorch 等价性
 ABOT_RECON_REQUIRE_CUROPE=1 pytest -q tests/test_curope_parity.py
 
+# 验证真实模型权重推理
 ABOT_RECON_CHECKPOINT=checkpoints/abot_recon.safetensors \
 ABOT_RECON_IMAGE_DIR=examples/images \
 ABOT_RECON_DEVICE=cuda \
 pytest -q tests/integration/test_real_checkpoint.py
 ```
 
-## 发布状态
+---
 
-- [ ] 训练代码与配置（计划于 9 月 30 日前发布）
-- [x] 公开模型权重
-- [x] 推理与评测代码
-
-## 引用
+## 📖 引用
 
 ```bibtex
-@article{abot_recon2026,
-  title         = {Revisiting Local Context for Long-Horizon Streaming 3D Reconstruction},
-  author        = {{AMAP CV Lab}},
-  journal       = {arXiv preprint arXiv:2608.27529},
-  year          = {2026},
-  eprint        = {2608.27529},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.CV},
-  doi           = {10.48550/arXiv.2608.27529},
-  url           = {https://arxiv.org/abs/2608.27529}
+@misc{han2026revisitinglocalcontextlonghorizon,
+      title={Revisiting Local Context for Long-Horizon Streaming 3D Reconstruction}, 
+      author={Jiarong Han and Jincheng Xiong and Yuzhou Liu and Linzhe Shi and Changjie Wu and Ning Guo and Mu Xu and Hang Zhang and Ming Qian},
+      year={2026},
+      eprint={2608.27529},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2608.27529}, 
 }
 ```
 
-## 许可证与致谢
+---
 
-源代码采用 [Apache License 2.0](LICENSE)。模型权重遵循 [MODEL_LICENSE.md](MODEL_LICENSE.md)，第三方组件及其许可证记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+## 📄 开源许可证与致谢
 
-使用模型前，请阅读[模型使用说明](MODEL_USAGE_GUIDELINES_ZH.md)。
+本项目源码遵循 [Apache License 2.0](LICENSE) 许可。模型权重的使用受 [MODEL_LICENSE.md](MODEL_LICENSE.md) 约束，第三方依赖说明参见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-ABot-Recon 基于 Pi3 构建，并参考了 CroCo、DUSt3R、DINOv2、SALAD、FlashInfer、LingBot-Map、HorizonStream 和 LongStream。感谢这些工作的作者与贡献者。
+使用模型前请仔细阅读 [模型使用规范 (Model Usage Guidelines)](MODEL_USAGE_GUIDELINES.md)。
 
-## 我们组的其他工作
+ABot-Recon 基于 Pi3 构建，并从 CroCo、DUSt3R、DINOv2、SALAD、FlashInfer、LingBot-Map、HorizonStream 和 LongStream 等优秀开源工作中获得启发，特此向相关作者与社区贡献者致谢。
+
+同时衷心感谢葛增叶、潘宏宇、孙忠旭、汪奔涛、徐玉婷、欧阳天健、余浩铭、陈楚子与张智阳在本项目推进过程中给予的宝贵支持与贡献。
+
+---
+
+## 🌐 团队其他工作
 
 - [ABot-Earth](https://abot-earth.amap.com/)

@@ -24,98 +24,231 @@
 
 > **In one sentence:** ABot-Recon reconstructs long video streams with a fixed 12-frame local context, composing current-frame geometry and adjacent relative poses into a global reconstruction without persistent learned long-range memory. 
 
-## 📣 News
+---
 
-- **2026-08-31:** Thanks to the Hugging Face team, an interactive [ABot-Recon Demo](https://huggingface.co/spaces/acvlab/abot-recon-streaming-3d) is now available online. Try it out!
+## 📣 Highlights & New Features
 
-## Why local context?
+- **Native WebGL2 3DGS Viewer:** Interactive 3D Gaussian Splatting rasterizer built directly into the web viewer (`viewer/index.html`), supporting smooth rendering of millions of splats with point/splat toggling.
+- **Closed-Form PCD to 3DGS Converter (`scripts/pcd_to_3dgs.py`):** Instantly converts dense/sparse point clouds into standard 3D Gaussian Splatting PLY format without neural re-training.
+- **Real-Time 8090 Streaming Engine & 8088 Live Visualizer Bridge:** WebSocket (`/ws/viewer`) and SSE (`/api/stream/live`) broadcast channels for zero-latency point cloud and camera trajectory streaming.
+- **Dynamic Object Filtering (YOLO-seg):** Real-time semantic masking and dynamic point cloud pruning.
+- **Method 2 Multi-Stream Incremental Scene Fusion:** Sim(3) Pose Graph Optimization (PGO), multi-scale VGICP registration, and Statistical Outlier Removal (SOR) for multi-robot collaborative mapping.
 
-Long-horizon streaming reconstruction is often approached by adding increasingly elaborate mechanisms for retaining and fusing long-range state. ABot-Recon takes a deliberately local route. At each time step, it solves the same bounded prediction problem:
+---
 
-- cache KV features from the preceding 11 frames;
-- predict a point map $P_i$ in the current camera coordinate system;
-- estimate the adjacent relative pose $T_{i-1\leftarrow i}$; and
-- recover the global trajectory and point cloud through sequential pose composition.
+## 🚀 Migration & Deployment Guide
 
-This design keeps model-state memory and per-frame computation independent of the elapsed sequence length. A lightweight motion-visual rotation refiner and composition-aware pose loss are used to limit drift when local poses are composed over long horizons.
+This section provides complete instructions for deploying ABot-Recon on a fresh server or migrating an existing deployment.
 
-## Results at a glance
+### 1. System & Hardware Requirements
 
-<p align="center">
-  <img src="benchmark_comparison_transparent.png" width="82%" alt="ABot-Recon comparison on Oxford Spires and KITTI-02">
-</p>
+| Component | Minimum Specification | Recommended Specification |
+|---|---|---|
+| **OS** | Linux (Ubuntu 20.04 / 22.04 LTS) | Ubuntu 22.04 LTS x86_64 |
+| **GPU** | NVIDIA GPU with CUDA compute capability $\ge 8.0$ (RTX 3090, 4090, A10, A100, H100) | RTX 4090 (24GB) or A100 (40GB/80GB) |
+| **VRAM** | 8 GB (Single stream offline inference) | 16 GB ~ 24 GB (Concurrent 8090 streaming + YOLO-seg + 8088 WebGL2 3DGS visualizer) |
+| **CPU / RAM** | 8 Cores, 16 GB System RAM | 16+ Cores, 32 GB ~ 64 GB System RAM |
+| **Storage** | $\ge 25\text{ GB}$ free SSD space (Model weights + cache + outputs) | NVMe SSD $\ge 100\text{ GB}$ |
+| **Python & CUDA** | Python 3.10 ~ 3.11, CUDA 12.1 | Python 3.11, CUDA 12.1, PyTorch 2.5.1 |
 
-| Evaluation | Result | Setting |
-|---|---:|---|
-| Oxford Spires camera pose | ATE **4.35 m**, RPE-R **0.12°** | Streaming model only; no loop closure |
-| Oxford Spires dense reconstruction | CD **1.37 m**, F1 **91.81%** | F1 threshold $\tau=4$ m |
-| KITTI-02 streaming efficiency | **24.45 FPS**, **6.71 GiB** | 504×280, NVIDIA H100, input storage excluded |
+---
 
-The full paper reports camera-pose results on KITTI, Oxford Spires, and VBR, together with dense reconstruction on 7Scenes, TUM-Dynamic, and Oxford Spires.
+### 2. Environment Setup & Dependency Installation
 
-## Installation
-
-The released configuration targets Linux, Python 3.10 or later, PyTorch 2.5.1, and CUDA 12.1. The release environment was validated on NVIDIA A100, while the paper's runtime benchmark uses an NVIDIA H100.
-
+#### Step 2.1: Create Conda Virtual Environment
 ```bash
 conda create -n abot-recon python=3.11 -y
 conda activate abot-recon
-
-pip install torch==2.5.1 torchvision==0.20.1 \
-  --index-url https://download.pytorch.org/whl/cu121
-pip install -e .
 ```
 
-### Recommended acceleration
+#### Step 2.2: Install PyTorch with CUDA 12.1
+```bash
+pip install torch==2.5.1 torchvision==0.20.1 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
 
-ABot-Recon uses paged KV-cache operators from FlashInfer when they are available and falls back to PyTorch SDPA otherwise. Compiling cuRoPE further accelerates rotary position encoding.
+#### Step 2.3: Install All Project Dependencies
+You can install dependencies via [requirements.txt](requirements.txt) or directly via editable package installation:
 
 ```bash
+# Option A: Install from requirements.txt (Recommended for server deployment)
+pip install -r requirements.txt
+
+# Option B: Install editable package with all optional modules
+pip install -e ".[all]"
+```
+
+#### Step 2.4: Build Acceleration Extensions (FlashInfer & cuRoPE)
+ABot-Recon utilizes paged KV-cache operators from FlashInfer and custom CUDA kernels for rotary position encoding (cuRoPE):
+
+```bash
+# 1. FlashInfer paged KV-cache
 pip install flashinfer-python
 flashinfer show-config
 
+# 2. Compile cuRoPE CUDA extension
 cd abot_recon/modeling/pi3/models/curope
 pip install ninja
 python setup.py build_ext --inplace
 cd -
 ```
 
-## Model checkpoint
+---
 
-The released checkpoint is available on [Hugging Face](https://huggingface.co/acvlab/ABot-Recon) and [ModelScope](https://modelscope.cn/models/amap_cvlab/ABot-Recon). The Python API and demo download it automatically from Hugging Face and reuse the local cache. For offline inference, download the checkpoint manually and place it at:
+### 3. Model Weights & Asset Deployment
+
+The system requires several pre-trained model weights. Place them in the following directory layout:
 
 ```text
-checkpoints/abot_recon.safetensors
+ABot-Recon/
+├── checkpoints/
+│   ├── abot_recon.safetensors         # [Required] Core ABot-Recon model (~4.0 GB)
+│   └── loop/                          # [Optional] Loop closure retrieval weights
+│       ├── dino_salad.ckpt            # (~352 MB)
+│       └── dinov2_vitb14_pretrain.pth # (~346 MB)
+├── yolo11m-seg.pt                     # [Optional] Dynamic object filter model (~45 MB)
+└── yolo11n-seg.pt                     # [Optional] Lightweight dynamic filter model (~6 MB)
 ```
 
-## Quick start
+#### Downloading Checkpoints
 
-The base model requires neither loop-closure dependencies nor loop assets. Input images are sorted lexicographically, so frame names should be zero-padded (for example, `000001.jpg`, `000002.jpg`, ...).
+* **ABot-Recon Core Model (~4.0 GB)**:
+  - From **Hugging Face**: [acvlab/ABot-Recon](https://huggingface.co/acvlab/ABot-Recon)
+  - From **ModelScope**: [amap_cvlab/ABot-Recon](https://modelscope.cn/models/amap_cvlab/ABot-Recon)
+
+  ```bash
+  mkdir -p checkpoints
+  
+  # Download using huggingface-cli
+  huggingface-cli download acvlab/ABot-Recon abot_recon.safetensors --local-dir checkpoints --local-dir-use-symlinks False
+  
+  # Or download from ModelScope (fast in Mainland China)
+  python -c "from modelscope import snapshot_download; snapshot_download('amap_cvlab/ABot-Recon', local_dir='checkpoints')"
+  ```
+
+* **Loop Closure Assets (Optional, ~700 MB)**:
+  ```bash
+  python scripts/download_loop_assets.py --output-dir checkpoints/loop
+  ```
+
+* **YOLO-seg Dynamic Removal Model (Optional, ~45 MB)**:
+  ```bash
+  # Automatically downloaded on first use, or pre-download manually:
+  python -c "from ultralytics import YOLO; YOLO('yolo11m-seg.pt')"
+  ```
+
+> [!TIP]
+> **Proxy Configuration for Large File Downloads**: If deploying in an environment requiring an outbound proxy to reach Hugging Face or GitHub, configure your proxy environment (e.g. using `proxy_download` or setting `export HTTP_PROXY=... HTTPS_PROXY=...`).
+
+---
+
+### 4. Dual-Service Architecture & One-Click Management
+
+ABot-Recon features a dual-service architecture designed for both online real-time reconstruction and high-performance 3D visualization:
+
+```
+┌────────────────────────────────────────────────────────┐
+│               ABot-Recon Dual-Service Architecture     │
+├─────────────────────────┬──────────────────────────────┤
+│  Port 8088: Web Viewer  │  Port 8090: Streaming API    │
+│  - Native WebGL2 3DGS   │  - Real-time Multi-Session   │
+│  - Point Cloud Render   │  - WebSocket / SSE Stream    │
+│  - Camera Trajectory    │  - YOLO Dynamic Filter       │
+│  - Relays to 8090       │  - Incremental Scene Fusion  │
+└─────────────────────────┴──────────────────────────────┘
+```
+
+The unified management script [`manage_services.sh`](manage_services.sh) handles start, stop, restart, status check, and log monitoring.
+
+#### Service Management Commands
 
 ```bash
-python demo.py \
-  --image-dir examples/images \
-  --output-dir outputs/demo \
-  --attention-backend auto \
-  --no-loop-closure
+# 1. Start all services (Port 8088 and Port 8090)
+./manage_services.sh start all
+
+# 2. Check service status, ports, and PIDs
+./manage_services.sh status
+
+# 3. View real-time service logs
+./manage_services.sh log 8088    # 3D Viewer logs
+./manage_services.sh log 8090    # Real-time Streaming API logs
+
+# 4. Restart or stop services
+./manage_services.sh restart all
+./manage_services.sh stop all
 ```
 
-This minimal example performs one causal pass and writes the raw camera trajectory, adjacent relative poses, local point maps, confidence maps, and run metadata. See [Optional loop closure](#optional-loop-closure) for trajectory refinement on sequences with revisited regions.
+#### Firewall & Reverse Proxy (Nginx) Configuration
 
-Useful output controls:
+Ensure ports **8088** and **8090** are open in your server firewall:
+```bash
+sudo ufw allow 8088/tcp
+sudo ufw allow 8090/tcp
+```
 
-| Option | Effect |
-|---|---|
-| `--save-world-points` | Transform local point maps using the final trajectory and save a global point cloud |
-| `--no-save-local-points` | Skip per-frame local point maps |
-| `--no-save-confidence` | Skip confidence maps |
-| `--confidence-threshold T` | Mask points below confidence `T` in `[0, 1]` |
-| `--loop-closure` / `--no-loop-closure` | Enable or disable optional loop-closure refinement; enabled by default |
-| `--start`, `--end`, `--stride` | Select frames from the ordered input stream |
-| `--dense-stride N` | Estimate every selected-frame pose but save dense outputs every `N` frames |
-| `--max-frames N` | Set the maximum supported stream length; default: `22000` |
+When placing behind an **Nginx** reverse proxy, ensure WebSocket upgrade headers are properly forwarded:
+```nginx
+location /ws/ {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400s;
+}
+```
 
-### Python API
+---
+
+### 5. Real-Time Streaming & Live Camera Mapping
+
+You can push live camera streams (USB camera, IP/RTSP camera, or video file) to Port 8090 for online 3D mapping and observe the point cloud growth in real-time on Port 8088:
+
+```bash
+# Push live USB camera (device 0)
+python scripts/stream_camera_to_8090.py --source 0 --session-id office_cam --fps 12
+
+# Push RTSP network camera stream
+python scripts/stream_camera_to_8090.py --source "rtsp://admin:password@192.168.1.100:554/stream" --session-id rtsp_robot
+
+# Push local video at real-time recording speed
+python scripts/stream_camera_to_8090.py --source data/mine/video1.mp4 --session-id video1_stream --fps 15
+```
+
+**Live Web Observation**: Open `http://<SERVER_IP>:8088` in your browser, switch to the **"8090 连接的 Stream 视频流"** tab, and select your active session. The viewer will render camera frustums and incremental point clouds in real time.
+
+---
+
+### 6. Point Cloud to 3DGS Gaussian Splatting & WebGL2 Rendering
+
+Convert any reconstructed point cloud into a standard 3D Gaussian Splatting PLY model using closed-form covariance and spherical harmonics estimation:
+
+```bash
+python scripts/pcd_to_3dgs.py \
+  --input outputs/demo/reconstruction.ply \
+  --output outputs/demo/reconstruction_3dgs.ply \
+  --knn 16 \
+  --opacity 0.85
+```
+
+- **Interactive WebGL2 Splat Viewer**: Open `http://<SERVER_IP>:8088`, load the generated 3DGS PLY, and toggle between **Points** and **3DGS Splats** modes to inspect rasterized Gaussian ellipsoids with full lighting and rotation control.
+
+---
+
+### 7. Multi-Stream Scene Fusion Pipeline (Method 2)
+
+Merge multiple video trajectories and point clouds into a globally consistent coordinate system with Sim(3) Pose Graph Optimization and multi-scale VGICP:
+
+```bash
+python scripts/match_and_fuse_method2.py \
+  --models outputs/stream1/reconstruction.ply outputs/stream2/reconstruction.ply \
+  --output-dir outputs/fused_scene \
+  --pgo \
+  --sor
+```
+
+---
+
+## 💻 Python API & Offline Inference
 
 ```python
 from pathlib import Path
@@ -132,74 +265,13 @@ model = ABotRecon.from_pretrained(
 
 result = model.infer(images)
 
-trajectory = result.camera_poses
-relative_poses = result.relative_poses
-local_points = result.local_points
-confidence = result.confidence
+trajectory = result.camera_poses      # (N, 4, 4) world-to-camera or camera-to-world
+relative_poses = result.relative_poses # (N-1, 4, 4)
+local_points = result.local_points     # (N, H, W, 3)
+confidence = result.confidence         # (N, H, W)
 ```
 
-The checkpoint is downloaded once and then loaded from the Hugging Face cache.
-For offline inference, replace the repository ID with a local checkpoint path.
-
-Set `output_world_points=True` to return point maps transformed by the final trajectory. Use `dense_output_indices` when dense geometry is needed for only a subset of frames.
-
-## Optional loop closure
-
-The learned model does not depend on loop closure. When a sequence contains useful revisits, the optional backend retrieves candidate frame pairs with DINOv2-SALAD descriptors, predicts relative-pose constraints with ABot-Recon, and refines the trajectory through sparse pose-graph optimization.
-
-Install the optional dependencies and download the retrieval checkpoints:
-
-```bash
-pip install -e ".[loop]"
-python scripts/download_loop_assets.py --output-dir checkpoints/loop
-```
-
-Expected files:
-
-```text
-checkpoints/
-├── abot_recon.safetensors
-└── loop/
-    ├── dino_salad.ckpt
-    └── dinov2_vitb14_pretrain.pth
-```
-
-Run inference with loop closure:
-
-```bash
-python demo.py \
-  --image-dir examples/images \
-  --output-dir outputs/demo_loop \
-  --attention-backend auto \
-  --loop-closure
-```
-
-When loop closure is enabled, `camera_poses` stores the refined trajectory, while `camera_poses_noloop` preserves the raw streaming prediction.
-
-## Outputs
-
-The exact set of files follows the selected output options:
-
-```text
-outputs/demo/
-├── camera_poses.npy
-├── relative_poses.npy
-├── camera_poses_noloop.npy
-├── relative_poses_noloop.npy
-├── camera_poses_loop.npy       # only with loop closure
-├── relative_poses_loop.npy     # only with loop closure
-├── local_points.pt             # enabled by default
-├── world_points.pt             # with --save-world-points
-├── colors.pt                   # RGB aligned with saved point maps
-├── confidence.pt               # enabled by default
-├── confidence_mask.pt          # enabled by default
-└── metadata.json
-```
-
-Local point maps remain in their corresponding camera coordinate systems. World points are generated using the final selected trajectory.
-
-### Visualization
-
+Export dense colored point clouds to PLY:
 ```bash
 python scripts/export_reconstruction_ply.py \
   --poses outputs/demo/camera_poses.npy \
@@ -209,42 +281,40 @@ python scripts/export_reconstruction_ply.py \
   --bev-output outputs/demo/trajectory_bev.png
 ```
 
-This creates an RGB point-cloud PLY and a separate BEV trajectory PNG.
+---
 
-## Evaluation
+## 🛠️ Migration & Deployment Troubleshooting Checklist
 
-Camera-pose and dense-reconstruction protocols are maintained on the `eval` branch:
+| Issue | Cause | Solution |
+|---|---|---|
+| **CUDA Out of Memory (OOM)** | Video frames too long or resolution too high for GPU VRAM | 1. Add `--dense-stride 2` or `--point-stride 4`<br>2. Run without dynamic filter: omit `--dynamic-filter`<br>3. Lower input stream resolution (e.g. 504x280) |
+| **FlashInfer ImportError / ABI mismatch** | FlashInfer compiled against a different PyTorch / CUDA version | Set `--attention-backend sdpa` to fallback to PyTorch native scaled dot-product attention |
+| **cuRoPE compilation fails** | Missing `ninja` or incompatible GCC version | Run `pip install ninja` and verify `gcc --version` ($\ge 9.0$). cuRoPE is optional; model falls back to PyTorch RoPE automatically |
+| **Port 8088 / 8090 already in use** | Stray background process holding the port | Run `./manage_services.sh stop all` or identify process with `lsof -i :8088` and `kill -9 <PID>` |
+| **WebSocket disconnects immediately** | Nginx or proxy dropping WebSocket upgrade headers | Add `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` to Nginx config |
+| **Model weights download timeout** | Network latency to Hugging Face | Use ModelScope mirror `snapshot_download('amap_cvlab/ABot-Recon')` or configure proxy environment |
+
+---
+
+## 🧪 Tests
 
 ```bash
-git switch eval
-```
-
-That branch documents dataset preparation, third-party checkpoints, benchmark commands, and metric aggregation. Dense reconstruction is evaluated without loop closure to match the paper protocol.
-
-## Tests
-
-```bash
+# Run unit tests
 pytest -q
-```
 
-CUDA-specific and real-checkpoint tests are available separately:
-
-```bash
+# Run cuRoPE parity test
 ABOT_RECON_REQUIRE_CUROPE=1 pytest -q tests/test_curope_parity.py
 
+# Run real checkpoint integration test
 ABOT_RECON_CHECKPOINT=checkpoints/abot_recon.safetensors \
 ABOT_RECON_IMAGE_DIR=examples/images \
 ABOT_RECON_DEVICE=cuda \
 pytest -q tests/integration/test_real_checkpoint.py
 ```
 
-## Release status
+---
 
-- [ ] Training code and recipes (to be released by September 30)
-- [x] Public model checkpoint
-- [x] Inference and evaluation code
-
-## Citation
+## 📖 Citation
 
 ```bibtex
 @misc{han2026revisitinglocalcontextlonghorizon,
@@ -258,7 +328,9 @@ pytest -q tests/integration/test_real_checkpoint.py
 }
 ```
 
-## License and acknowledgements
+---
+
+## 📄 License & Acknowledgements
 
 Source code is released under the [Apache License 2.0](LICENSE). Model weights are governed by [MODEL_LICENSE.md](MODEL_LICENSE.md), and third-party components are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -266,8 +338,10 @@ Before using the model, please review the [Model Usage Guidelines](MODEL_USAGE_G
 
 ABot-Recon builds on Pi3 and draws inspiration from CroCo, DUSt3R, DINOv2, SALAD, FlashInfer, LingBot-Map, HorizonStream, and LongStream. We thank their authors and contributors.
 
-We would also like to express our sincere gratitude to Zengye Ge, Hongyu Pan, Zhongxu Sun, Bentao Wang, Yuting Xu, Tianjian Ouyang, Haoming Yu, Chuzi Chen, and Zhiyang Zhang for their valuable support and contributions to this project.
+Special thanks to Zengye Ge, Hongyu Pan, Zhongxu Sun, Bentao Wang, Yuting Xu, Tianjian Ouyang, Haoming Yu, Chuzi Chen, and Zhiyang Zhang for their valuable support.
 
-## Other Works from Our Group
+---
+
+## 🌐 Other Works from Our Group
 
 - [ABot-Earth](https://abot-earth.amap.com/)

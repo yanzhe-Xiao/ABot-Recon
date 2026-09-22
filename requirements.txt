@@ -1,0 +1,42 @@
+# ==============================================================================
+# ABot-Recon: Complete Requirements Specification
+# Environment Target: Linux, Python >= 3.10 (3.11 recommended), CUDA >= 12.1
+# ==============================================================================
+
+# --- 1. PyTorch & CUDA Core ---
+# Note: For CUDA 12.1, install via PyTorch wheel index:
+# pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchvision==0.20.1
+
+# --- 2. Core 3D Reconstruction & Neural Network Dependencies ---
+einops>=0.7.0
+huggingface-hub>=0.23.0
+numpy>=1.24.0,<3.0.0
+omegaconf>=2.3.0
+pillow>=9.5.0
+safetensors>=0.4.0
+tqdm>=4.66.0
+scipy>=1.10.0
+
+# --- 3. Web Viewer (8088) & Online Streaming API Server (8090) ---
+fastapi>=0.110.0
+uvicorn>=0.28.0
+websockets>=12.0
+open3d>=0.18.0
+opencv-python>=4.8.0
+requests>=2.31.0
+
+# --- 4. Dynamic Object Filtering & Segmentation (8090 / Offline) ---
+ultralytics>=8.2.0
+
+# --- 5. Loop Closure, Multi-Stream Fusion (Method 2) & Optimization ---
+faiss-cpu>=1.8.0
+pypose>=0.6.0
+scikit-learn>=1.3.0
+
+# --- 6. Optional High-Performance Acceleration & Build Utilities ---
+# FlashInfer: Paged KV-cache acceleration for streaming inference
+flashinfer-python>=0.2.0; platform_system == "Linux"
+# Ninja: Parallel build tool for compiling cuRoPE CUDA extension
+ninja>=1.11.0
