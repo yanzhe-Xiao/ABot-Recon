@@ -228,7 +228,7 @@ start_8088() {
 start_8090() {
     local host="${HOST:-$DEFAULT_HOST}"
     local port="${PORT_8090}"
-    local device="${DEVICE_8090:-$(detect_best_device)}"
+    local devices="${DEVICES_8090:-${DEVICE_8090:-${DEVICE:-auto}}}"
 
     echo -e "${CYAN}[8090] 检查 Streaming API 服务状态...${NC}"
     if is_port_listening "$port"; then
@@ -239,11 +239,11 @@ start_8090() {
     fi
 
     echo -e "${CYAN}[8090] 正在启动 Streaming API (viewer/streaming_api_server.py)...${NC}"
-    echo -e "       Host: ${host}, Port: ${port}, Device: ${device}"
+    echo -e "       Host: ${host}, Port: ${port}, Devices: ${devices}"
     echo -e "       Python: ${PYTHON_BIN}"
     echo -e "       Log   : ${LOG_FILE_8090}"
 
-    setsid "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --device "$device" --dynamic-filter --dynamic-model yolo11m-seg.pt --dynamic-conf 0.12 --dynamic-dilate 15 > "$LOG_FILE_8090" 2>&1 &
+    setsid "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --devices "$devices" --dynamic-filter --dynamic-model yolo11n-seg.pt --dynamic-conf 0.12 --dynamic-dilate 7 --dynamic-interval 2 > "$LOG_FILE_8090" 2>&1 &
     local pid=$!
     disown "$pid" 2>/dev/null || true
     echo "$pid" > "$PID_FILE_8090"

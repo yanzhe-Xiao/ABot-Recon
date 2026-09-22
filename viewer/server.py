@@ -591,7 +591,53 @@ async def _stream_video_frames_to_8090(
 
         frame_idx = 0
         sent_count = 0
+        ack_count = 0
         t0_stream = time.time()
+        sem = asyncio.Semaphore(3)
+        summary_container: dict = {}
+        eos_received = asyncio.Event()
+
+        async def receiver():
+            nonlocal ack_count, summary_container
+            while not eos_received.is_set():
+                try:
+                    ack_raw = await ws.recv()
+                except Exception:
+                    break
+                try:
+                    ack = json.loads(ack_raw)
+                except Exception:
+                    continue
+
+                msg_type = ack.get("type")
+                if msg_type == "frame_result":
+                    sem.release()
+                    ack_count += 1
+                    if effective_total > 0:
+                        infer_pct = min(70.0, (ack_count / effective_total) * 70.0)
+                    else:
+                        infer_pct = min(70.0, ack_count * 0.5)
+
+                    current_progress = round(10.0 + infer_pct, 1)
+                    now = time.time()
+                    elapsed = now - t0_stream
+                    current_fps = round(ack_count / elapsed, 1) if elapsed > 0 else 0.0
+
+                    with _VIDEO_TASKS_LOCK:
+                        if task_id in _VIDEO_TASKS:
+                            _VIDEO_TASKS[task_id].update({
+                                "current_frame": ack_count,
+                                "progress": current_progress,
+                                "fps": current_fps,
+                                "message": f"3D 神经流式建图中: 帧 {ack_count}/{effective_total} ({current_progress}%, {current_fps} FPS)",
+                                "updated_at": now,
+                            })
+                elif msg_type == "session_completed":
+                    summary_container.update(ack)
+                    eos_received.set()
+                    break
+
+        recv_task = asyncio.create_task(receiver())
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -601,31 +647,9 @@ async def _stream_video_frames_to_8090(
             if frame_idx % frame_stride == 0:
                 success, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 if success:
+                    await sem.acquire()
                     await ws.send(buf.tobytes())
                     sent_count += 1
-
-                    ack_raw = await ws.recv()
-                    ack = json.loads(ack_raw)
-
-                    if effective_total > 0:
-                        infer_pct = min(70.0, (sent_count / effective_total) * 70.0)
-                    else:
-                        infer_pct = min(70.0, sent_count * 0.5)
-
-                    current_progress = round(10.0 + infer_pct, 1)
-                    now = time.time()
-                    elapsed = now - t0_stream
-                    current_fps = round(sent_count / elapsed, 1) if elapsed > 0 else 0.0
-
-                    with _VIDEO_TASKS_LOCK:
-                        if task_id in _VIDEO_TASKS:
-                            _VIDEO_TASKS[task_id].update({
-                                "current_frame": sent_count,
-                                "progress": current_progress,
-                                "fps": current_fps,
-                                "message": f"3D 神经流式建图中: 帧 {sent_count}/{effective_total} ({current_progress}%, {current_fps} FPS)",
-                                "updated_at": now,
-                            })
 
             frame_idx += 1
 
@@ -651,8 +675,12 @@ async def _stream_video_frames_to_8090(
                         "updated_at": time.time(),
                     })
 
-        summary_raw = await ws.recv()
-        summary = json.loads(summary_raw)
+        try:
+            await asyncio.wait_for(recv_task, timeout=45.0)
+        except asyncio.TimeoutError:
+            print(f"[Video Service] Task {task_id} wait for EOS timeout", flush=True)
+
+        summary = summary_container
         return summary
 
 def run_video_pipeline_thread(
