@@ -9,6 +9,12 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
+import email.parser
+import asyncio
+import subprocess
+import shutil
+import websockets
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -17,6 +23,12 @@ import cv2
 import numpy as np
 import open3d as o3d
 import torch
+import struct
+try:
+    from scipy.spatial import cKDTree
+except ImportError:
+    cKDTree = None
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -25,6 +37,9 @@ from viewer.stream_backend import OnlineReconstructionEngine
 
 # In-memory cache for colors.pt video stream tensors (max 8 models)
 _COLORS_CACHE: Dict[str, torch.Tensor] = {}
+# In-memory cache for dynamic replay buffers (max 6 models)
+_REPLAY_CACHE: Dict[str, bytes] = {}
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def load_colors_tensor(dir_or_file: Path) -> Optional[torch.Tensor]:
     """Load colors.pt from directory or parent directory with caching."""
@@ -105,13 +120,18 @@ def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
         parent / f"{stem}_poses.npy",
         parent / f"{stem}_camera_poses.npy",
         parent / f"{stem}.poses.npy",
+        parent / "camera_poses.npy",
+        parent / "camera_poses_loop.npy",
+        parent / "camera_poses_noloop.npy",
+        parent / "robot_poses.npy",
     ]
-    if "reconstruction" in stem:
-        candidates.extend([
-            parent / "camera_poses.npy",
-            parent / "camera_poses_loop.npy",
-            parent / "camera_poses_noloop.npy",
-        ])
+    if parent.is_dir():
+        for p in parent.glob("*-robot_poses.npy"):
+            candidates.append(p)
+        for p in parent.glob("*camera_poses*.npy"):
+            candidates.append(p)
+        for p in parent.glob("*poses*.npy"):
+            candidates.append(p)
 
     for c in candidates:
         if c.is_file():
@@ -121,6 +141,118 @@ def find_trajectory_for_ply(ply_path: Path) -> Optional[str]:
             except ValueError:
                 pass
     return None
+
+def generate_replay_buffer(target_path: Path, stride: int = 4, conf_thresh: float = 0.1) -> bytes:
+    """Generate binary buffer containing per-frame points and colors for dynamic mapping playback."""
+    target_path = target_path.resolve()
+    model_dir = target_path if target_path.is_dir() else target_path.parent
+
+    wp_path = model_dir / "world_points.pt"
+    cp_path = model_dir / "colors.pt"
+    conf_path = model_dir / "confidence.pt"
+
+    frame_counts: List[int] = []
+    all_xyz: List[np.ndarray] = []
+    all_rgb: List[np.ndarray] = []
+
+    if wp_path.is_file() and cp_path.is_file():
+        wp = torch.load(wp_path, map_location="cpu", weights_only=False)
+        cp = torch.load(cp_path, map_location="cpu", weights_only=False)
+        conf = torch.load(conf_path, map_location="cpu", weights_only=False) if conf_path.is_file() else None
+
+        total_frames = min(len(wp), len(cp))
+        step = max(1, stride)
+        for i in range(total_frames):
+            w_f = wp[i, ::step, ::step].reshape(-1, 3).numpy()
+            c_f = cp[i, ::step, ::step].reshape(-1, 3).numpy()
+            valid = np.isfinite(w_f).all(axis=-1)
+            if conf is not None:
+                cf = conf[i, ::step, ::step].reshape(-1).numpy()
+                valid &= (cf >= conf_thresh)
+            xyz_v = w_f[valid].astype(np.float32)
+            rgb_v = c_f[valid].astype(np.uint8)
+            frame_counts.append(len(xyz_v))
+            all_xyz.append(xyz_v)
+            all_rgb.append(rgb_v)
+    else:
+        # Fallback to PLY file + poses
+        ply_path = target_path if target_path.is_file() and target_path.suffix.lower() == ".ply" else model_dir / "reconstruction.ply"
+        if not ply_path.is_file():
+            ply_files = list(model_dir.glob("*.ply"))
+            if ply_files:
+                ply_path = ply_files[0]
+            else:
+                raise FileNotFoundError(f"No PLY file found in {model_dir}")
+
+        pcd = o3d.io.read_point_cloud(str(ply_path))
+        pts = np.asarray(pcd.points, dtype=np.float32)
+        if len(pcd.colors) == len(pts):
+            c_arr = np.asarray(pcd.colors, dtype=np.float32)
+            if c_arr.max() <= 1.01:
+                colors = (c_arr * 255.0).clip(0, 255).astype(np.uint8)
+            else:
+                colors = c_arr.clip(0, 255).astype(np.uint8)
+        else:
+            colors = np.full((len(pts), 3), 200, dtype=np.uint8)
+
+        # Find poses
+        poses = None
+        traj_url = find_trajectory_for_ply(ply_path)
+        if traj_url:
+            traj_path = ROOT_DIR / traj_url.lstrip("/")
+            if traj_path.is_file():
+                try:
+                    loaded = np.load(traj_path).astype(np.float32)
+                    if loaded.ndim == 3 and loaded.shape[1:] == (4, 4):
+                        poses = loaded
+                    elif loaded.ndim == 2 and loaded.shape[1] == 16:
+                        poses = loaded.reshape(-1, 4, 4)
+                except Exception:
+                    pass
+
+        # Downsample if too many points (> 1.2M points)
+        if len(pts) > 1200000:
+            sub_step = int(np.ceil(len(pts) / 1200000))
+            pts = pts[::sub_step]
+            colors = colors[::sub_step]
+
+        if poses is not None and len(poses) > 0 and cKDTree is not None:
+            total_frames = len(poses)
+            cam_centers = poses[:, :3, 3]
+            tree = cKDTree(cam_centers)
+            _, assignments = tree.query(pts, workers=-1)
+            sort_idx = np.argsort(assignments)
+            pts = pts[sort_idx]
+            colors = colors[sort_idx]
+            counts = np.bincount(assignments, minlength=total_frames)
+            frame_counts = counts.tolist()
+            all_xyz = [pts]
+            all_rgb = [colors]
+        else:
+            total_frames = len(poses) if poses is not None else 60
+            chunk_size = int(np.ceil(len(pts) / total_frames))
+            frame_counts = []
+            for i in range(total_frames):
+                s = i * chunk_size
+                e = min((i + 1) * chunk_size, len(pts))
+                frame_counts.append(max(0, e - s))
+            all_xyz = [pts]
+            all_rgb = [colors]
+
+    if all_xyz:
+        xyz_arr = np.concatenate(all_xyz, axis=0)
+        rgb_arr = np.concatenate(all_rgb, axis=0)
+    else:
+        xyz_arr = np.zeros((0, 3), dtype=np.float32)
+        rgb_arr = np.zeros((0, 3), dtype=np.uint8)
+
+    total_points = len(xyz_arr)
+    header = struct.pack("<4sIII", b"ABTR", 1, total_frames, total_points)
+    fc_bytes = np.array(frame_counts, dtype=np.uint32).tobytes()
+    xyz_bytes = xyz_arr.astype(np.float32).tobytes()
+    rgb_bytes = rgb_arr.astype(np.uint8).tobytes()
+
+    return header + fc_bytes + xyz_bytes + rgb_bytes
 
 def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
     """Scan outputs/ directory dynamically with 3-second cache to prevent redundant disk I/O."""
@@ -136,6 +268,7 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
     ply_files = sorted(outputs_dir.glob("**/*.ply"))
     models = []
     category_priority = {
+        "✨ 3D 高斯泼溅 (3D Gaussian Splatting)": -1,
         "🔥 多视角融合点云 (Multi-Stream Fusion)": 0,
         "📹 单视频重建点云 (Single Video)": 1,
         "🧹 滤波去噪点云 (Denoised Cleaned)": 2,
@@ -161,9 +294,13 @@ def scan_all_ply_models(force: bool = False) -> List[Dict[str, Any]]:
             rel_dir = str(ply_path.parent.name)
         stem = ply_path.stem
         fname = ply_path.name
-
+        # 0. 3D Gaussian Splatting (3DGS)
+        if "3dgs" in stem or "splat" in stem:
+            category = "✨ 3D 高斯泼溅 (3D Gaussian Splatting)"
+            tag = "✨ [3DGS 高斯]"
+            name = f"{tag} {stem} ({format_point_count(vertex_count)} 高斯, {size_mb:.1f}MB, {mtime_str})"
         # 1. Multi-Stream / General Fusion
-        if "fusion" in rel_str or "merged" in stem or "fused_" in stem:
+        elif "fusion" in rel_str or "merged" in stem or "fused_" in stem:
             category = "🔥 多视角融合点云 (Multi-Stream Fusion)"
             is_colored = "colored" in stem
             is_full = "full" in stem
@@ -287,6 +424,314 @@ def get_engine(device: Optional[str] = None) -> OnlineReconstructionEngine:
             print("[Streaming Server] ABot-Recon Model Loaded Successfully.", flush=True)
         return _ENGINE
 
+# ---------------------------------------------------------------------------
+# Video Reconstruction Task Management & 8090 Streaming Bridge
+# ---------------------------------------------------------------------------
+_VIDEO_TASKS: Dict[str, Dict[str, Any]] = {}
+_VIDEO_TASKS_LOCK = threading.Lock()
+
+def is_port_listening(port: int = 8090, host: str = "127.0.0.1") -> bool:
+    """Quickly check if TCP port is listening."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+def ensure_streaming_service() -> bool:
+    """Ensure that the 8090 streaming reconstruction engine is active and responding."""
+    # 1. Quick check: if port is already listening, verify readiness
+    if is_port_listening(8090):
+        for _ in range(6):
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        return True
+            except Exception:
+                time.sleep(0.5)
+        # If TCP connects, 8090 daemon is running and alive
+        return True
+
+    # 2. Port not listening, attempt to start 8090
+    print("[Video Service] 8090 Streaming API is not listening. Spawning background service...", flush=True)
+    cmd = [sys.executable, str(ROOT_DIR / "viewer/streaming_api_server.py"), "--host", "0.0.0.0", "--port", "8090"]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print(f"[Video Service] Failed to spawn 8090 service: {e}", flush=True)
+        return False
+
+    for _ in range(40):
+        time.sleep(0.5)
+        if is_port_listening(8090):
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    if resp.status == 200:
+                        print("[Video Service] 8090 Streaming API is now ready!", flush=True)
+                        return True
+            except Exception:
+                pass
+    return is_port_listening(8090)
+
+def parse_multipart_request(headers: Any, rfile: Any, content_length: int) -> Tuple[Dict[str, str], Optional[Path], str]:
+    """Parse multipart/form-data directly, streaming any file part to outputs/uploads/."""
+    upload_dir = ROOT_DIR / "outputs" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    content_type = headers.get("Content-Type", "")
+    fields: Dict[str, str] = {}
+    saved_file_path: Optional[Path] = None
+    saved_filename = ""
+
+    if content_type.startswith("multipart/form-data"):
+        raw_body = rfile.read(content_length)
+        header_bytes = b"Content-Type: " + content_type.encode("latin1") + b"\r\n\r\n"
+        msg = email.parser.BytesParser().parsebytes(header_bytes + raw_body)
+
+        if msg.is_multipart():
+            for part in msg.get_payload():
+                cd = part.get("Content-Disposition")
+                if not cd:
+                    continue
+                name = part.get_param("name", header="Content-Disposition")
+                filename = part.get_filename()
+                payload = part.get_payload(decode=True)
+                if filename and payload:
+                    clean_name = Path(filename).name.replace(" ", "_")
+                    t_prefix = time.strftime("%Y%m%d_%H%M%S")
+                    target_path = upload_dir / f"{t_prefix}_{clean_name}"
+                    with open(target_path, "wb") as f:
+                        f.write(payload)
+                    saved_file_path = target_path
+                    saved_filename = filename
+                elif name and payload:
+                    fields[name] = payload.decode("utf-8", errors="ignore")
+    elif content_length > 0:
+        # Fallback: treat entire body as raw video data
+        t_prefix = time.strftime("%Y%m%d_%H%M%S")
+        target_path = upload_dir / f"{t_prefix}_upload.mp4"
+        with open(target_path, "wb") as f:
+            remaining = content_length
+            while remaining > 0:
+                chunk_size = min(remaining, 1024 * 1024)
+                chunk = rfile.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        saved_file_path = target_path
+        saved_filename = "upload.mp4"
+
+    return fields, saved_file_path, saved_filename
+
+async def _stream_video_frames_to_8090(
+    task_id: str,
+    video_path: Path,
+    scene_id: str,
+    session_id: str,
+    point_stride: int,
+    frame_stride: int,
+    voxel_size: float,
+    confidence_threshold: float,
+    auto_fuse: bool,
+    dynamic_filter: bool,
+) -> Dict[str, Any]:
+    ws_url = (
+        f"ws://127.0.0.1:8090/ws/stream?"
+        f"session_id={urllib.parse.quote(session_id)}&"
+        f"scene_id={urllib.parse.quote(scene_id)}&"
+        f"point_stride={point_stride}&"
+        f"frame_stride={frame_stride}&"
+        f"voxel_size={voxel_size}&"
+        f"confidence_threshold={confidence_threshold}&"
+        f"auto_fuse={'true' if auto_fuse else 'false'}&"
+        f"dynamic_filter={'true' if dynamic_filter else 'false'}&"
+        f"include_points=false"
+    )
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"无法读取视频文件: {video_path.name}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    effective_total = max(1, total_frames // frame_stride) if total_frames > 0 else 0
+
+    with _VIDEO_TASKS_LOCK:
+        if task_id in _VIDEO_TASKS:
+            _VIDEO_TASKS[task_id].update({
+                "status": "reconstructing",
+                "total_frames": total_frames,
+                "effective_frames": effective_total,
+                "video_fps": round(video_fps, 1),
+                "resolution": f"{width}x{height}",
+                "message": f"连接 8090 神经建图引擎 (视频共 {total_frames} 帧, 抽帧步长 {frame_stride})...",
+                "progress": 5.0,
+            })
+
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        handshake_raw = await ws.recv()
+        handshake = json.loads(handshake_raw)
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id]["message"] = "8090 引擎就绪，正在逐帧流式推理与自回归位姿跟踪..."
+                _VIDEO_TASKS[task_id]["progress"] = 10.0
+
+        frame_idx = 0
+        sent_count = 0
+        t0_stream = time.time()
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % frame_stride == 0:
+                success, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if success:
+                    await ws.send(buf.tobytes())
+                    sent_count += 1
+
+                    ack_raw = await ws.recv()
+                    ack = json.loads(ack_raw)
+
+                    if effective_total > 0:
+                        infer_pct = min(70.0, (sent_count / effective_total) * 70.0)
+                    else:
+                        infer_pct = min(70.0, sent_count * 0.5)
+
+                    current_progress = round(10.0 + infer_pct, 1)
+                    now = time.time()
+                    elapsed = now - t0_stream
+                    current_fps = round(sent_count / elapsed, 1) if elapsed > 0 else 0.0
+
+                    with _VIDEO_TASKS_LOCK:
+                        if task_id in _VIDEO_TASKS:
+                            _VIDEO_TASKS[task_id].update({
+                                "current_frame": sent_count,
+                                "progress": current_progress,
+                                "fps": current_fps,
+                                "message": f"3D 神经流式建图中: 帧 {sent_count}/{effective_total} ({current_progress}%, {current_fps} FPS)",
+                                "updated_at": now,
+                            })
+
+            frame_idx += 1
+
+        cap.release()
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "finalizing",
+                    "progress": 82.0,
+                    "message": "视频所有帧已推送完毕，正在进行空间体素滤波去重与三维点云固化...",
+                    "updated_at": time.time(),
+                })
+
+        await ws.send(json.dumps({"type": "EOS"}))
+
+        if auto_fuse:
+            with _VIDEO_TASKS_LOCK:
+                if task_id in _VIDEO_TASKS:
+                    _VIDEO_TASKS[task_id].update({
+                        "progress": 88.0,
+                        "message": "正在执行跨视角多模态配准与 optv2 全局几何与点云优化 (PGO + MLS + 去噪)...",
+                        "updated_at": time.time(),
+                    })
+
+        summary_raw = await ws.recv()
+        summary = json.loads(summary_raw)
+        return summary
+
+def run_video_pipeline_thread(
+    task_id: str,
+    video_path: Path,
+    scene_id: str,
+    session_id: str,
+    point_stride: int,
+    frame_stride: int,
+    voxel_size: float,
+    confidence_threshold: float,
+    auto_fuse: bool,
+    dynamic_filter: bool,
+) -> None:
+    try:
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id]["message"] = "检查 8090 神经建图推理服务状态..."
+                _VIDEO_TASKS[task_id]["progress"] = 3.0
+
+        if not ensure_streaming_service():
+            raise RuntimeError("8090 实时流式建图服务未启动且自动拉起超时，请先检查服务状态")
+
+        summary = asyncio.run(
+            _stream_video_frames_to_8090(
+                task_id=task_id,
+                video_path=video_path,
+                scene_id=scene_id,
+                session_id=session_id,
+                point_stride=point_stride,
+                frame_stride=frame_stride,
+                voxel_size=voxel_size,
+                confidence_threshold=confidence_threshold,
+                auto_fuse=auto_fuse,
+                dynamic_filter=dynamic_filter,
+            )
+        )
+
+        scan_all_ply_models(force=True)
+
+        clean_scene_id = summary.get("scene_id", scene_id)
+        folder_name = summary.get("folder_name", session_id)
+
+        scene_disk_ply = ROOT_DIR / "outputs" / "scenes" / clean_scene_id / "reconstruction.ply"
+        stream_disk_ply = ROOT_DIR / "outputs" / "streams" / folder_name / "reconstruction.ply"
+
+        if scene_disk_ply.is_file():
+            viewer_url = f"/outputs/scenes/{clean_scene_id}/reconstruction.ply"
+        elif stream_disk_ply.is_file():
+            viewer_url = f"/outputs/streams/{folder_name}/reconstruction.ply"
+        else:
+            viewer_url = summary.get("scene_download_url") or summary.get("deliverables", {}).get("ply_url")
+
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "completed",
+                    "progress": 100.0,
+                    "message": "🎉 3D 建图与优化已全部完成！",
+                    "result": summary,
+                    "viewer_url": viewer_url,
+                    "scene_id": clean_scene_id,
+                    "folder_name": folder_name,
+                    "dedup_point_count": summary.get("dedup_point_count", 0),
+                    "updated_at": time.time(),
+                })
+        print(f"[Video Pipeline] Task [{task_id}] finished successfully! Viewer URL: {viewer_url}", flush=True)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _VIDEO_TASKS_LOCK:
+            if task_id in _VIDEO_TASKS:
+                _VIDEO_TASKS[task_id].update({
+                    "status": "failed",
+                    "error": str(e),
+                    "message": f"建图失败: {e}",
+                    "updated_at": time.time(),
+                })
+
 class StreamingRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT_DIR), **kwargs)
@@ -322,10 +767,26 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content)
                 return
+        if path in ("/gaussian.html", "/splat", "/gaussian", "/viewer/gaussian.html"):
+            gauss_path = ROOT_DIR / "viewer" / "gaussian.html"
+            if gauss_path.is_file():
+                with open(gauss_path, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.end_headers()
+                self.wfile.write(content)
+                return
         if path == "/api/stream":
             return self.handle_sse_stream(parsed_url.query)
         if path == "/api/video_info":
             return self.handle_video_info(parsed_url.query)
+        if path == "/api/replay_pointcloud":
+            return self.handle_replay_pointcloud(parsed_url.query)
         if path == "/api/frame":
             return self.handle_video_frame(parsed_url.query)
         if path == "/api/trajectory_info":
@@ -339,7 +800,87 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
             return self.handle_status()
         if path == "/api/stop":
             return self.handle_stop_stream()
+
+        # Video Upload & 3D Reconstruction Endpoints (8090 Pipeline Bridge)
+        if path in ("/api/video/status", "/api/upload/status"):
+            return self.handle_video_status(parsed_url.query)
+        if path in ("/api/video/tasks", "/api/upload/tasks"):
+            return self.handle_video_tasks()
+        if path in ("/api/video/progress", "/api/upload/progress"):
+            return self.handle_video_progress_sse(parsed_url.query)
+        if path == "/api/scenes":
+            return self.handle_scenes_list()
+
+        # 8090 Real-time Stream Relay Endpoints
+        if path in ("/api/8090/sessions", "/api/live_streams"):
+            return self.handle_8090_sessions()
+        if path in ("/api/8090/live", "/api/stream/8090"):
+            return self.handle_8090_live_sse(parsed_url.query)
+        if path == "/api/8090/status":
+            return self.handle_8090_status()
+        if path == "/api/8090/snapshot":
+            return self.handle_8090_snapshot(parsed_url.query)
+
         return super().do_GET()
+
+    def do_POST(self) -> None:
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+
+        if path in ("/api/video/upload", "/api/upload_video", "/api/video/reconstruct"):
+            return self.handle_video_upload(parsed_url.query)
+        if path == "/api/stop":
+            return self.handle_stop_stream()
+        if path == "/api/convert_to_3dgs":
+            return self.handle_convert_to_3dgs(parsed_url.query)
+        self.send_error(404, f"POST endpoint not found: {path}")
+    def handle_convert_to_3dgs(self, query_string: str) -> None:
+        """Convert a given PLY point cloud into standard 3DGS Gaussian PLY & .splat format."""
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        if not model_path_str:
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len > 0:
+                    body = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    model_path_str = body.get("path", "").lstrip("/")
+            except Exception:
+                pass
+
+        if not model_path_str:
+            self.send_error(400, "Missing path parameter")
+            return
+
+        target_ply = ROOT_DIR / model_path_str
+        if not target_ply.is_file():
+            self.send_error(404, f"Target point cloud file not found: {model_path_str}")
+            return
+
+        from scripts.pcd_to_3dgs import convert_point_cloud_to_3dgs
+
+        try:
+            out_ply = target_ply.parent / f"{target_ply.stem}_3dgs.ply"
+            res = convert_point_cloud_to_3dgs(
+                input_path=target_ply,
+                output_path=out_ply,
+                scale_mode="adaptive",
+                base_scale=0.006,
+                thin_factor=0.15,
+                opacity=0.95,
+                sh_degree=0,
+                export_splat=True,
+            )
+            scan_all_ply_models(force=True)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            rel_3dgs_ply = str(out_ply.relative_to(ROOT_DIR))
+            res["viewer_url"] = f"/{rel_3dgs_ply}"
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+        except Exception as e:
+            self.send_error(500, f"3DGS conversion failed: {e}")
+
 
     def handle_offline_models(self) -> None:
         """List all reconstructed 3D point cloud models stored on disk in outputs/."""
@@ -404,10 +945,57 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
                     "path": model_path_str,
                 }
 
+        model_dir = target_path if target_path.is_dir() else target_path.parent
+        has_wp = (model_dir / "world_points.pt").is_file() and (model_dir / "colors.pt").is_file()
+        traj_url = find_trajectory_for_ply(target_path) if target_path.is_file() and target_path.suffix.lower() == ".ply" else None
+        has_replay = has_wp or (traj_url is not None)
+        info["has_replay"] = has_replay
+        info["replay_url"] = f"/api/replay_pointcloud?path={urllib.parse.quote(model_path_str)}"
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(info).encode("utf-8"))
+
+    def handle_replay_pointcloud(self, query_string: str) -> None:
+        """Return binary stream containing per-frame point cloud for dynamic mapping replay."""
+        global _REPLAY_CACHE
+        params = urllib.parse.parse_qs(query_string)
+        model_path_str = params.get("path", [""])[0].lstrip("/")
+        stride = int(params.get("stride", ["4"])[0])
+        conf_thresh = float(params.get("confidence_threshold", ["0.1"])[0])
+
+        if not model_path_str:
+            self.send_error(400, "Missing path parameter")
+            return
+
+        target_path = ROOT_DIR / model_path_str
+        if not target_path.exists():
+            self.send_error(404, f"File or directory not found: {model_path_str}")
+            return
+
+        cache_key = f"{model_path_str}_{stride}_{conf_thresh}"
+        if cache_key in _REPLAY_CACHE:
+            payload = _REPLAY_CACHE[cache_key]
+        else:
+            try:
+                payload = generate_replay_buffer(target_path, stride=stride, conf_thresh=conf_thresh)
+                if len(_REPLAY_CACHE) > 6:
+                    _REPLAY_CACHE.pop(next(iter(_REPLAY_CACHE)))
+                _REPLAY_CACHE[cache_key] = payload
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_error(500, f"Failed to generate replay pointcloud: {e}")
+                return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def handle_trajectory_info(self, query_string: str) -> None:
         """Return trajectory availability and URL for a given PLY model."""
@@ -570,6 +1158,329 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"status": "stopped"}).encode("utf-8"))
 
+    def handle_video_upload(self, query_string: str) -> None:
+        """Receive uploaded video file and trigger 8090 causal 3D reconstruction and optimization."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Missing video payload (Content-Length is 0)"}).encode("utf-8"))
+            return
+
+        fields, saved_file_path, original_filename = parse_multipart_request(self.headers, self.rfile, content_length)
+
+        # Merge URL query parameters into fields
+        params = urllib.parse.parse_qs(query_string)
+        for k, v in params.items():
+            if k not in fields and v:
+                fields[k] = v[0]
+
+        if not saved_file_path or not saved_file_path.is_file():
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "No valid video file uploaded"}).encode("utf-8"))
+            return
+
+        stem_clean = Path(original_filename).stem if original_filename else "video"
+        stem_clean = stem_clean.replace(" ", "_").replace("-", "_")
+
+        scene_id = fields.get("scene_id", "").strip() or stem_clean
+        session_id = fields.get("session_id", "").strip()
+        if not session_id:
+            t_str = time.strftime("%Y%m%d_%H%M%S")
+            session_id = f"{scene_id}_{t_str}"
+
+        point_stride = int(fields.get("point_stride", 2))
+        frame_stride = int(fields.get("frame_stride", 1))
+        voxel_size = float(fields.get("voxel_size", 0.003))
+        confidence_threshold = float(fields.get("confidence_threshold", 0.1))
+        auto_fuse = str(fields.get("auto_fuse", "true")).lower() in ("true", "1", "yes")
+        dynamic_filter = str(fields.get("dynamic_filter", "false")).lower() in ("true", "1", "yes")
+        wait_for_completion = str(fields.get("wait", "false")).lower() in ("true", "1", "yes")
+
+        task_id = f"task_{session_id}"
+        with _VIDEO_TASKS_LOCK:
+            _VIDEO_TASKS[task_id] = {
+                "task_id": task_id,
+                "status": "queued",
+                "progress": 0.0,
+                "message": "视频已上传，排队等待 3D 建图推理...",
+                "scene_id": scene_id,
+                "session_id": session_id,
+                "video_path": str(saved_file_path),
+                "original_filename": original_filename,
+                "point_stride": point_stride,
+                "frame_stride": frame_stride,
+                "voxel_size": voxel_size,
+                "confidence_threshold": confidence_threshold,
+                "auto_fuse": auto_fuse,
+                "dynamic_filter": dynamic_filter,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "current_frame": 0,
+                "total_frames": 0,
+                "fps": 0.0,
+                "result": None,
+                "error": None,
+            }
+
+        worker = threading.Thread(
+            target=run_video_pipeline_thread,
+            kwargs={
+                "task_id": task_id,
+                "video_path": saved_file_path,
+                "scene_id": scene_id,
+                "session_id": session_id,
+                "point_stride": point_stride,
+                "frame_stride": frame_stride,
+                "voxel_size": voxel_size,
+                "confidence_threshold": confidence_threshold,
+                "auto_fuse": auto_fuse,
+                "dynamic_filter": dynamic_filter,
+            },
+            daemon=True,
+        )
+        worker.start()
+
+        if wait_for_completion:
+            while True:
+                with _VIDEO_TASKS_LOCK:
+                    t_info = _VIDEO_TASKS.get(task_id, {})
+                    status = t_info.get("status")
+                if status in ("completed", "failed"):
+                    break
+                time.sleep(0.5)
+
+            self.send_response(200 if status == "completed" else 500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(t_info, ensure_ascii=False).encode("utf-8"))
+            return
+
+        resp_data = {
+            "status": "queued",
+            "task_id": task_id,
+            "scene_id": scene_id,
+            "session_id": session_id,
+            "message": "视频已成功接收并加入建图任务队列",
+            "status_url": f"/api/video/status?task_id={task_id}",
+            "progress_url": f"/api/video/progress?task_id={task_id}",
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp_data, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_status(self, query_string: str) -> None:
+        """Query status of a specific video reconstruction task or list all."""
+        params = urllib.parse.parse_qs(query_string)
+        task_id = params.get("task_id", [""])[0]
+        with _VIDEO_TASKS_LOCK:
+            if not task_id:
+                tasks = list(_VIDEO_TASKS.values())
+                data = {"tasks": tasks}
+            elif task_id in _VIDEO_TASKS:
+                data = _VIDEO_TASKS[task_id]
+            else:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"Task '{task_id}' not found"}).encode("utf-8"))
+                return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_tasks(self) -> None:
+        """Return list of recent video reconstruction tasks."""
+        with _VIDEO_TASKS_LOCK:
+            tasks = list(_VIDEO_TASKS.values())
+        tasks.sort(key=lambda t: t.get("created_at", 0), reverse=True)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(tasks, ensure_ascii=False).encode("utf-8"))
+
+    def handle_video_progress_sse(self, query_string: str) -> None:
+        """Server-Sent Events stream for real-time task progress reporting."""
+        params = urllib.parse.parse_qs(query_string)
+        task_id = params.get("task_id", [""])[0]
+        if not task_id:
+            self.send_error(400, "Missing task_id parameter")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        last_progress = -1.0
+        last_status = ""
+        while True:
+            with _VIDEO_TASKS_LOCK:
+                task = _VIDEO_TASKS.get(task_id)
+                if not task:
+                    break
+                status = task.get("status", "")
+                progress = task.get("progress", 0.0)
+                snapshot = dict(task)
+
+            if progress != last_progress or status != last_status:
+                last_progress = progress
+                last_status = status
+                try:
+                    payload = f"event: progress\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+                    self.wfile.write(payload.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    break
+
+            if status in ("completed", "failed"):
+                try:
+                    event_name = "complete" if status == "completed" else "error"
+                    payload = f"event: {event_name}\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+                    self.wfile.write(payload.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                break
+
+            time.sleep(0.3)
+
+    def handle_scenes_list(self) -> None:
+        """List all registered scenes in outputs/scenes/."""
+        scenes_dir = ROOT_DIR / "outputs" / "scenes"
+        results = []
+        if scenes_dir.is_dir():
+            for d in sorted(scenes_dir.iterdir()):
+                if d.is_dir() and not d.name.startswith("."):
+                    ply = d / "reconstruction.ply"
+                    colored_ply = d / "reconstruction_colored.ply"
+                    meta_file = d / "scene_metadata.json"
+                    meta = {}
+                    if meta_file.is_file():
+                        try:
+                            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                    results.append({
+                        "scene_id": d.name,
+                        "has_ply": ply.is_file(),
+                        "has_colored_ply": colored_ply.is_file(),
+                        "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2) if ply.is_file() else 0.0,
+                        "streams": meta.get("completed_sessions", []),
+                        "is_fused": meta.get("is_fused", False),
+                        "updated_at": meta.get("updated_at"),
+                    })
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(results, ensure_ascii=False).encode("utf-8"))
+
+
+    def handle_8090_status(self) -> None:
+        """Check whether 8090 streaming engine is listening and operational."""
+        alive = is_port_listening(8090)
+        info = {"running": alive, "port": 8090}
+        if alive:
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/", headers={"User-Agent": "ABot-8088"})
+                with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        info["ready"] = True
+            except Exception:
+                info["ready"] = False
+        else:
+            info["ready"] = False
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(info).encode("utf-8"))
+
+    def handle_8090_sessions(self) -> None:
+        """Query 8090 for currently active and completed streaming sessions."""
+        res = {"status": "stopped", "active_sessions": [], "completed_sessions": []}
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8090/api/sessions", headers={"User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    res = {
+                        "status": "running",
+                        "active_sessions": data.get("active_sessions", []),
+                        "completed_sessions": data.get("completed_sessions", []),
+                    }
+        except Exception:
+            pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+
+    def handle_8090_live_sse(self, query_string: str) -> None:
+        """Relay real-time 8090 SSE events to the browser client on 8088."""
+        params = urllib.parse.parse_qs(query_string)
+        session_id = params.get("session_id", [""])[0]
+
+        target_url = "http://127.0.0.1:8090/api/stream/live"
+        if session_id:
+            target_url += f"/{urllib.parse.quote(session_id)}"
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        try:
+            req = urllib.request.Request(target_url, headers={"Accept": "text/event-stream", "User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=3600) as resp:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    self.wfile.write(line)
+                    if line == b"\n":
+                        self.wfile.flush()
+        except Exception as e:
+            try:
+                err_data = f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                self.wfile.write(err_data.encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass
+
+    def handle_8090_snapshot(self, query_string: str) -> None:
+        """Relay session 3D reconstruction snapshot from 8090."""
+        params = urllib.parse.parse_qs(query_string)
+        session_id = params.get("session_id", [""])[0]
+        if not session_id:
+            self.send_error(400, "Missing session_id parameter")
+            return
+        target_url = f"http://127.0.0.1:8090/api/stream/snapshot/{urllib.parse.quote(session_id)}"
+        try:
+            req = urllib.request.Request(target_url, headers={"User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=10) as resp:
+                data = resp.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+        except Exception as e:
+            self.send_error(500, f"Failed to fetch snapshot from 8090: {e}")
 
     def handle_sse_stream(self, query_string: str) -> None:
         """Stream frame-by-frame 3D reconstruction using Server-Sent Events (SSE)."""

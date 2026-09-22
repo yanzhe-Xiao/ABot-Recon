@@ -17,8 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+
+# Set thread limits to prevent OpenMP oversubscription or deadlocks in thread pools
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+os.environ.setdefault("MKL_NUM_THREADS", "8")
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,15 +51,15 @@ class PostFusionOptimizer:
     def __init__(
         self,
         voxel_size: float = 0.015,
-        dense_icp_distance: float = 0.06,
+        dense_icp_distance: float = 0.08,
         plane_threshold: float = 0.025,
-        mls_radius: float = 0.05,
+        mls_radius: float = 0.08,
         mls_iterations: int = 3,
         mls_k_neighbors: int = 50,
-        sor_neighbors: int = 20,
-        sor_ratio: float = 2.0,
-        ror_min_neighbors: int = 6,
-        ror_radius: float = 0.03,
+        sor_neighbors: int = 30,
+        sor_ratio: float = 1.2,
+        ror_min_neighbors: int = 12,
+        ror_radius: float = 0.05,
         enable_submap_icp: bool = True,
         enable_plane_leveling: bool = True,
         enable_surface_thinning: bool = True,
@@ -85,20 +91,27 @@ class PostFusionOptimizer:
         """Fit dominant plane and return inlier ratio, thickness and mean residual."""
         if len(pcd.points) < 100:
             return {"inliers": 0, "inlier_ratio_pct": 0.0, "mean_residual_mm": 0.0, "std_residual_mm": 0.0}
-        plane_model, inliers = pcd.segment_plane(
-            distance_threshold=threshold, ransac_n=3, num_iterations=1000
+        if len(pcd.points) > 200_000:
+            pcd_fit = pcd.voxel_down_sample(0.02)
+        else:
+            pcd_fit = pcd
+        plane_model, _ = pcd_fit.segment_plane(
+            distance_threshold=threshold, ransac_n=3, num_iterations=500
         )
         [a, b, c, d] = plane_model
         norm = np.linalg.norm([a, b, c])
-        pts_in = np.asarray(pcd.points)[inliers]
-        dists = np.abs(pts_in @ np.array([a, b, c]) + d) / norm
+        pts_all = np.asarray(pcd.points)
+        dists_all = np.abs(pts_all @ np.array([a, b, c]) + d) / norm
+        inliers_mask = dists_all <= threshold
+        inliers_count = int(inliers_mask.sum())
+        dists = dists_all[inliers_mask]
         return {
             "plane_equation": [round(float(x), 4) for x in [a, b, c, d]],
-            "inliers": int(len(inliers)),
-            "inlier_ratio_pct": round(float(len(inliers) / len(pcd.points) * 100), 2),
-            "mean_residual_mm": round(float(dists.mean() * 1000), 2),
-            "std_residual_mm": round(float(dists.std() * 1000), 2),
-            "max_residual_mm": round(float(dists.max() * 1000), 2),
+            "inliers": inliers_count,
+            "inlier_ratio_pct": round(float(inliers_count / len(pcd.points) * 100), 2),
+            "mean_residual_mm": round(float(dists.mean() * 1000), 2) if inliers_count > 0 else 0.0,
+            "std_residual_mm": round(float(dists.std() * 1000), 2) if inliers_count > 0 else 0.0,
+            "max_residual_mm": round(float(dists.max() * 1000), 2) if inliers_count > 0 else 0.0,
         }
 
     @staticmethod
@@ -155,26 +168,51 @@ class PostFusionOptimizer:
                 src_down = submaps[si]["down"]
                 tgt_down = submaps[sj]["down"]
 
-                # ICP: source=si -> target=sj
+                # Multi-scale coarse-to-fine Point-to-Plane ICP:
+                T_curr_ij = np.eye(4, dtype=np.float64)
+                for dist, vox in [(0.20, 0.04), (0.10, 0.025), (self.dense_icp_distance, 0.015)]:
+                    s_vox = src_down.voxel_down_sample(vox)
+                    t_vox = tgt_down.voxel_down_sample(vox)
+                    s_vox.estimate_normals()
+                    t_vox.estimate_normals()
+                    reg = o3d.pipelines.registration.registration_icp(
+                        source=s_vox, target=t_vox, max_correspondence_distance=dist,
+                        init=T_curr_ij,
+                        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                    )
+                    if reg.fitness > 0.15:
+                        T_curr_ij = reg.transformation
+
                 reg_ij = o3d.pipelines.registration.registration_icp(
-                    source=src_down,
-                    target=tgt_down,
+                    source=src_down, target=tgt_down,
                     max_correspondence_distance=self.dense_icp_distance,
-                    init=np.eye(4, dtype=np.float64),
+                    init=T_curr_ij,
                     estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
                     criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
                 )
 
-                # ICP: source=sj -> target=si (reverse)
+                # Reverse ICP: source=sj -> target=si with multi-scale
+                T_curr_ji = np.eye(4, dtype=np.float64)
+                for dist, vox in [(0.20, 0.04), (0.10, 0.025), (self.dense_icp_distance, 0.015)]:
+                    s_vox = tgt_down.voxel_down_sample(vox)
+                    t_vox = src_down.voxel_down_sample(vox)
+                    s_vox.estimate_normals()
+                    t_vox.estimate_normals()
+                    reg = o3d.pipelines.registration.registration_icp(
+                        source=s_vox, target=t_vox, max_correspondence_distance=dist,
+                        init=T_curr_ji,
+                        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                    )
+                    if reg.fitness > 0.15:
+                        T_curr_ji = reg.transformation
+
                 reg_ji = o3d.pipelines.registration.registration_icp(
-                    source=tgt_down,
-                    target=src_down,
+                    source=tgt_down, target=src_down,
                     max_correspondence_distance=self.dense_icp_distance,
-                    init=np.eye(4, dtype=np.float64),
+                    init=T_curr_ji,
                     estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
                     criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
                 )
-
                 pair_label = f"{si}<->{sj}"
 
                 # Forward edge (i->j) if valid
@@ -334,9 +372,9 @@ class PostFusionOptimizer:
     def apply_bilateral_surface_thinning(
         self,
         pcd: o3d.geometry.PointCloud,
-        radius: float = 0.05,
-        sigma_c: float = 0.03,
-        sigma_s: float = 0.015,
+        radius: float = 0.08,
+        sigma_c: float = 0.04,
+        sigma_s: float = 0.03,
         alpha: float = 0.8,
     ) -> o3d.geometry.PointCloud:
         """
@@ -346,31 +384,53 @@ class PostFusionOptimizer:
         Multiple iterations with normal re-estimation progressively compress
         double-wall/floor ghosting onto a single surface.
         """
+        n_raw_points = len(pcd.points)
         iterations = self.mls_iterations
-        k_nn = min(self.mls_k_neighbors, max(10, len(pcd.points) - 1))
+        k_nn = min(self.mls_k_neighbors, max(10, n_raw_points - 1))
+
+        if n_raw_points > 2_500_000:
+            print(f"  [MLS Proxy] Subsampling {n_raw_points:,} points to ~1.4M for fast bilateral thinning...")
+            pcd_out = pcd.voxel_down_sample(0.008)
+            n_raw_points = len(pcd_out.points)
+            iterations = 1
+            k_nn = min(k_nn, 20)
+            chunk_size = 120000
+        else:
+            pcd_out = o3d.geometry.PointCloud(pcd)
+            if n_raw_points > 1_000_000:
+                iterations = min(iterations, 2)
+                k_nn = min(k_nn, 30)
+                chunk_size = 100000
+            else:
+                chunk_size = 80000
+
         print(
             f"\n[Post-Fusion Stage 3] Bilateral MLS surface thinning "
-            f"(radius={radius}m, {iterations} iterations, k={k_nn})..."
+            f"(points={n_raw_points:,}, radius={radius}m, {iterations} iters, k={k_nn}, chunk={chunk_size})..."
         )
         t0 = time.time()
-        pcd_out = o3d.geometry.PointCloud(pcd)
+
+        # Estimate normals once upfront if missing
+        if not pcd_out.has_normals() or len(pcd_out.normals) != n_raw_points:
+            pcd_out.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 1.6, max_nn=30)
+            )
 
         for it in range(iterations):
             t_iter = time.time()
 
-            # Re-estimate normals each iteration for convergence
-            pcd_out.estimate_normals(
-                o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 1.6, max_nn=30)
-            )
+            # Re-estimate normals only for moderate clouds and subsequent iterations
+            if it > 0 and n_raw_points <= 1_000_000:
+                pcd_out.estimate_normals(
+                    o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 1.6, max_nn=30)
+                )
+
             pts = np.asarray(pcd_out.points).copy()
             normals = np.asarray(pcd_out.normals).copy()
             n_points = len(pts)
 
             offsets = np.zeros(n_points, dtype=np.float64)
             tree = cKDTree(pts)
-
-            # Process in chunks to limit memory
-            chunk_size = 80000
             for b_start in range(0, n_points, chunk_size):
                 b_end = min(b_start + chunk_size, n_points)
                 chunk_pts = pts[b_start:b_end]  # (C, 3)
@@ -379,7 +439,7 @@ class PostFusionOptimizer:
 
                 # Vectorized KNN query
                 dists_raw, idxs_raw = tree.query(
-                    chunk_pts, k=k_nn, distance_upper_bound=radius
+                    chunk_pts, k=k_nn, distance_upper_bound=radius, workers=-1
                 )  # (C, k_nn)
 
                 # Mask invalid entries (inf distance from cKDTree sentinel)
@@ -544,9 +604,10 @@ class PostFusionOptimizer:
         for b_start in range(0, n_points, chunk_size):
             b_end = min(b_start + chunk_size, n_points)
             chunk_pts = pts[b_start:b_end]
-
-            dists_raw, idxs_raw = tree.query(chunk_pts, k=k_nn, distance_upper_bound=radius)
-            valid = np.isfinite(dists_raw) & (dists_raw > 1e-12)
+            dists_raw, idxs_raw = tree.query(
+                chunk_pts, k=k_nn, distance_upper_bound=radius, workers=-1
+            )
+            valid = np.isfinite(dists_raw)
             safe_idxs = np.clip(idxs_raw, 0, n_points - 1)
 
             # Neighbor colors: (C, k, 3)
@@ -822,8 +883,12 @@ class PostFusionOptimizer:
         plane_level_stats: dict = {}
         if self.enable_plane_leveling and len(merged_normal_dedup.points) > 500:
             print("\n[Stage 2] Dominant ground plane alignment & leveling...")
-            plane_m, inliers = merged_normal_dedup.segment_plane(
-                distance_threshold=self.plane_threshold, ransac_n=3, num_iterations=1000
+            if len(merged_normal_dedup.points) > 200_000:
+                pcd_plane = merged_normal_dedup.voxel_down_sample(0.02)
+            else:
+                pcd_plane = merged_normal_dedup
+            plane_m, _ = pcd_plane.segment_plane(
+                distance_threshold=self.plane_threshold, ransac_n=3, num_iterations=500
             )
             [a, b, c, d] = plane_m
             normal_vec = np.array([a, b, c], dtype=np.float64)
@@ -869,6 +934,30 @@ class PostFusionOptimizer:
             )
 
         # ============================================================
+        # Stage 2.5: Ground Sub-Surface Mirror Reflection Cutoff
+        # ============================================================
+        if self.enable_plane_leveling and len(merged_normal_dedup.points) > 500:
+            print("\n[Stage 2.5] Ground reflection & sub-surface cutoff...")
+            try:
+                p_down_leveled = merged_normal_dedup.voxel_down_sample(0.02)
+                plane_eq, inliers_g = p_down_leveled.segment_plane(
+                    distance_threshold=self.plane_threshold, ransac_n=3, num_iterations=300
+                )
+                if abs(plane_eq[up_axis_idx]) > 0.6:
+                    y_ground = -plane_eq[3] / plane_eq[up_axis_idx]
+                    p_pts = np.asarray(merged_normal_dedup.points)
+                    valid_above = p_pts[:, up_axis_idx] >= (y_ground - 0.02)
+                    n_refl = int((~valid_above).sum())
+                    if 0 < n_refl < len(p_pts) * 0.3:
+                        idx_keep = np.where(valid_above)[0]
+                        merged_normal_dedup = merged_normal_dedup.select_by_index(idx_keep)
+                        if merged_colored_dedup:
+                            merged_colored_dedup = merged_colored_dedup.select_by_index(idx_keep)
+                        print(f"  Removed {n_refl:,} mirror reflection points below floor level (Y < {y_ground - 0.02:.3f}m)")
+            except Exception as pe:
+                print(f"  [Notice] Ground reflection cutoff skipped ({pe})")
+
+        # ============================================================
         # Stage 3: Multi-Iteration Bilateral MLS Surface Thinning
         # ============================================================
         if self.enable_surface_thinning:
@@ -882,12 +971,11 @@ class PostFusionOptimizer:
         # Post-clean ROR (catch MLS-introduced edge artifacts)
         # ============================================================
         post_ror_stats: dict = {}
-        if self.enable_sor and len(merged_normal_dedup.points) > 1000:
+        if self.enable_sor and 1000 < len(merged_normal_dedup.points) <= 3_000_000:
             print("\n[Post-Clean] Radius Outlier Removal (after MLS)...")
             _, ind = merged_normal_dedup.remove_radius_outlier(
                 nb_points=self.ror_min_neighbors, radius=self.ror_radius
             )
-            pts_before = len(merged_normal_dedup.points)
             merged_normal_dedup = merged_normal_dedup.select_by_index(ind)
             pts_after = len(merged_normal_dedup.points)
             post_ror_stats = {
@@ -901,9 +989,8 @@ class PostFusionOptimizer:
         # ============================================================
         # Post-Clean: Seam Color Blending
         # ============================================================
-        if self.enable_color_harmonization:
+        if self.enable_color_harmonization and len(merged_normal_dedup.points) <= 3_000_000:
             merged_normal_dedup = self.apply_seam_color_blending(merged_normal_dedup)
-
         # ============================================================
         # Final benchmark
         # ============================================================

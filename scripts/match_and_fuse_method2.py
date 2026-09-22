@@ -92,7 +92,7 @@ class SequenceItem:
     conf: torch.Tensor
     kf_indices: np.ndarray
     descriptors: np.ndarray
-
+    static_masks: Optional[torch.Tensor] = None
 
 @dataclass
 class MatchEdge:
@@ -252,7 +252,8 @@ class Method2FusionPipeline:
             colors = torch.load(rdir / "colors.pt", map_location="cpu", weights_only=True)
             world = torch.load(rdir / "world_points.pt", map_location="cpu", weights_only=True)
             conf = torch.load(rdir / "confidence.pt", map_location="cpu", weights_only=True)
-
+            mask_file = rdir / "static_masks.pt"
+            static_masks = torch.load(mask_file, map_location="cpu", weights_only=True) if mask_file.is_file() else None
             pcd_raw = o3d.io.read_point_cloud(str(ply_path))
             pcd_down = pcd_raw.voxel_down_sample(self.downsample_voxel_size)
 
@@ -270,6 +271,7 @@ class Method2FusionPipeline:
                 conf=conf,
                 kf_indices=kf_idx,
                 descriptors=desc,
+                static_masks=static_masks,
             )
             print(f"    -> Points: {len(pcd_raw.points):,}, Keyframes: {len(kf_idx)}")
         return items
@@ -315,29 +317,33 @@ class Method2FusionPipeline:
                 ib_y = min(max(int(round(yb)), 0), 279)
                 ib_x = min(max(int(round(xb)), 0), 503)
                 if s_a.conf[fa, ia_y, ia_x] > 0.05 and s_b.conf[fb, ib_y, ib_x] > 0.05:
+                    if s_a.static_masks is not None and not s_a.static_masks[fa, ia_y, ia_x]:
+                        continue
+                    if s_b.static_masks is not None and not s_b.static_masks[fb, ib_y, ib_x]:
+                        continue
                     pa = s_a.world_pts[fa, ia_y, ia_x].numpy()
                     pb = s_b.world_pts[fb, ib_y, ib_x].numpy()
                     if np.isfinite(pa).all() and np.isfinite(pb).all():
                         p3d_a.append(pa)
                         p3d_b.append(pb)
-
-            p3d_a, p3d_b = np.array(p3d_a), np.array(p3d_b)
             if len(p3d_a) >= 4:
                 res = ransac_umeyama(p3d_a, p3d_b, estimate_scale=True, iters=3000, thresh=self.ransac_thresh)
                 if res is not None:
                     scale, R, t_vec, inliers, rmse = res
-                    solutions.append({
-                        "fa": fa,
-                        "fb": fb,
-                        "matches": len(matches),
-                        "pairs": len(p3d_a),
-                        "inliers": len(inliers),
-                        "inlier_ratio": len(inliers) / len(p3d_a),
-                        "scale": scale,
-                        "R": R,
-                        "t": t_vec,
-                        "rmse": rmse,
-                    })
+                    inlier_ratio = len(inliers) / len(p3d_a)
+                    if len(inliers) >= 18 and inlier_ratio >= 0.25:
+                        solutions.append({
+                            "fa": fa,
+                            "fb": fb,
+                            "matches": len(matches),
+                            "pairs": len(p3d_a),
+                            "inliers": len(inliers),
+                            "inlier_ratio": inlier_ratio,
+                            "scale": scale,
+                            "R": R,
+                            "t": t_vec,
+                            "rmse": rmse,
+                        })
 
         if not solutions:
             return None
@@ -362,6 +368,19 @@ class Method2FusionPipeline:
         T_rigid[:3, :3] = best["R"]
         T_rigid[:3, 3] = best["t"]
         T_fine = gicp_res.T_target_source @ T_rigid
+        # Geometric verification via Point-to-Plane ICP on submaps: verify surface residual
+        s_pts_trans = (np.asarray(s_a.pcd_down.points, dtype=np.float64) * best["scale"]) @ T_fine[:3, :3].T + T_fine[:3, 3]
+        s_check = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(s_pts_trans))
+        s_check.estimate_normals()
+        t_check = o3d.geometry.PointCloud(s_b.pcd_down)
+        t_check.estimate_normals()
+        reg_check = o3d.pipelines.registration.registration_icp(
+            s_check, t_check, 0.08, np.eye(4, dtype=np.float64),
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        )
+        # Overlapping surface must have low RMSE (< 50mm) and at least 300 surface correspondences
+        if reg_check.inlier_rmse > 0.050 or len(reg_check.correspondence_set) < 300:
+            return None
 
         score = float(best["inliers"]) * (1.0 / (best["rmse"] + 0.01))
         return MatchEdge(
@@ -413,6 +432,10 @@ class Method2FusionPipeline:
             for e in edges:
                 scores[e.tgt] += e.score
                 scores[e.src] += e.score * 0.5
+            # Weight by point count stability to favor complete, contiguous submaps
+            for s in seq_ids:
+                n_pts = len(items[s].pcd_down.points) if items[s].pcd_down is not None else 1000
+                scores[s] *= np.log10(max(10, n_pts))
             anchor = max(scores, key=lambda k: scores[k])
         print(f"[Anchor] Selected reference anchor: [{anchor}]")
 

@@ -117,9 +117,9 @@ get_pids_by_port() {
     local port="$1"
     local pids=()
 
-    # 1. lsof 检测
+    # 1. lsof 检测 (限定监听端，避免误伤连接该端口的客户端如 8088)
     if command -v lsof >/dev/null 2>&1; then
-        for p in $(lsof -ti :"$port" 2>/dev/null); do
+        for p in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
             pids+=("$p")
         done
     fi
@@ -193,8 +193,9 @@ start_8088() {
     echo -e "       Python: ${PYTHON_BIN}"
     echo -e "       Log   : ${LOG_FILE_8088}"
 
-    nohup "$PYTHON_BIN" viewer/server.py --host "$host" --port "$port" --device "$device" > "$LOG_FILE_8088" 2>&1 &
+    setsid "$PYTHON_BIN" viewer/server.py --host "$host" --port "$port" --device "$device" > "$LOG_FILE_8088" 2>&1 &
     local pid=$!
+    disown "$pid" 2>/dev/null || true
     echo "$pid" > "$PID_FILE_8088"
 
     # 等待验证启动并完成 GPU 预热 (最多等待 15 秒)
@@ -242,8 +243,9 @@ start_8090() {
     echo -e "       Python: ${PYTHON_BIN}"
     echo -e "       Log   : ${LOG_FILE_8090}"
 
-    nohup "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --device "$device" > "$LOG_FILE_8090" 2>&1 &
+    setsid "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --device "$device" --dynamic-filter --dynamic-model yolo11m-seg.pt --dynamic-conf 0.12 --dynamic-dilate 15 > "$LOG_FILE_8090" 2>&1 &
     local pid=$!
+    disown "$pid" 2>/dev/null || true
     echo "$pid" > "$PID_FILE_8090"
 
     # 等待验证启动 (最多等待 15 秒)
