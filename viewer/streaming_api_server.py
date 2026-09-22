@@ -254,9 +254,47 @@ class MultiSessionReconstructionManager:
                 pass
 
     def get_session_snapshot(self, session_id: str, max_points: int = 150000) -> Optional[Dict[str, Any]]:
-        """Extract accumulated history snapshot for late-joining observers."""
+        """Extract accumulated history snapshot for late-joining observers or completed streams."""
         if session_id not in self.sessions:
+            # Fallback for completed sessions whose in-memory session object was finalized
+            target_dir = self.output_base_dir / session_id
+            if not target_dir.is_dir():
+                for d in self.output_base_dir.iterdir():
+                    if d.is_dir() and (d.name == session_id or d.name.endswith(f"-{session_id}")):
+                        target_dir = d
+                        break
+            ply_path = target_dir / "reconstruction.ply"
+            if target_dir.is_dir() and ply_path.is_file():
+                try:
+                    pcd = o3d.io.read_point_cloud(str(ply_path))
+                    pts = np.asarray(pcd.points)
+                    colors = (np.asarray(pcd.colors) * 255).astype(np.uint8) if pcd.has_colors() else np.full((len(pts), 3), 200, dtype=np.uint8)
+                    total_pts = len(pts)
+                    if total_pts > max_points:
+                        indices = np.linspace(0, total_pts - 1, max_points, dtype=int)
+                        pts = pts[indices]
+                        colors = colors[indices]
+                    poses_path = target_dir / "camera_poses.npy"
+                    poses = np.load(poses_path).tolist() if poses_path.is_file() else []
+                    return {
+                        "type": "history_sync",
+                        "session_id": session_id,
+                        "scene_id": session_id,
+                        "frame_counter": len(poses),
+                        "processed_counter": len(poses),
+                        "poses": poses,
+                        "latest_pose": poses[-1] if poses else None,
+                        "points_xyz": np.round(pts, 4).tolist(),
+                        "points_rgb": colors.tolist(),
+                        "total_points_in_session": total_pts,
+                        "snapshot_point_count": len(pts),
+                        "latest_thumbnail": None,
+                        "message": f"已恢复历史推流资产 [{session_id}]：共 {len(pts):,} 点",
+                    }
+                except Exception as e:
+                    print(f"[Snapshot] Failed to load offline snapshot for {session_id}: {e}")
             return None
+
         session = self.sessions[session_id]
         if not session.sampled_history_points:
             return None
@@ -1674,9 +1712,12 @@ async def end_session(session_id: str = Query(...)):
     return summary
 
 
+_COMPLETED_SESSIONS_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+
 @app.get("/api/sessions")
 def list_sessions():
     """List all currently active sessions and completed session directories."""
+    global _COMPLETED_SESSIONS_CACHE
     manager = get_manager()
     now = time.time()
     active = [
@@ -1694,17 +1735,25 @@ def list_sessions():
         for sid, s in manager.sessions.items()
         if s.is_active
     ]
-    completed = []
-    if manager.output_base_dir.is_dir():
-        for d in sorted(manager.output_base_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
-            if d.is_dir() and not d.is_symlink() and (d / "reconstruction.ply").is_file():
-                ply = d / "reconstruction.ply"
-                completed.append({
-                    "session_id": d.name,
-                    "folder_name": d.name,
-                    "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2),
-                    "download_url": f"/api/streams/{d.name}/reconstruction.ply",
-                })
+    # Fast in-memory cache for completed sessions (re-scans at most once per 4 seconds)
+    if now - _COMPLETED_SESSIONS_CACHE[0] < 4.0 and _COMPLETED_SESSIONS_CACHE[1]:
+        completed = _COMPLETED_SESSIONS_CACHE[1]
+    else:
+        completed = []
+        if manager.output_base_dir.is_dir():
+            for d in sorted(manager.output_base_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+                if d.is_dir() and not d.is_symlink() and (d / "reconstruction.ply").is_file():
+                    ply = d / "reconstruction.ply"
+                    try:
+                        completed.append({
+                            "session_id": d.name,
+                            "folder_name": d.name,
+                            "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2),
+                            "download_url": f"/api/streams/{d.name}/reconstruction.ply",
+                        })
+                    except Exception:
+                        pass
+        _COMPLETED_SESSIONS_CACHE = (now, completed)
     return {"active_sessions": active, "completed_sessions": completed}
 
 

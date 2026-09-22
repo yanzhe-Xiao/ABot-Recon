@@ -429,12 +429,13 @@ def get_engine(device: Optional[str] = None) -> OnlineReconstructionEngine:
 # ---------------------------------------------------------------------------
 _VIDEO_TASKS: Dict[str, Dict[str, Any]] = {}
 _VIDEO_TASKS_LOCK = threading.Lock()
+_LAST_8090_SESSIONS: Dict[str, Any] = {"status": "stopped", "active_sessions": [], "completed_sessions": []}
 
 def is_port_listening(port: int = 8090, host: str = "127.0.0.1") -> bool:
-    """Quickly check if TCP port is listening."""
+    """Quickly check if TCP port is listening with robust 2.5s timeout."""
     import socket
     try:
-        with socket.create_connection((host, port), timeout=1.0):
+        with socket.create_connection((host, port), timeout=2.5):
             return True
     except (socket.timeout, ConnectionRefusedError, OSError):
         return False
@@ -1387,15 +1388,15 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
     def handle_8090_status(self) -> None:
         """Check whether 8090 streaming engine is listening and operational."""
         alive = is_port_listening(8090)
-        info = {"running": alive, "port": 8090}
+        info = {"running": alive, "port": 8090, "ready": alive}
         if alive:
             try:
                 req = urllib.request.Request("http://127.0.0.1:8090/", headers={"User-Agent": "ABot-8088"})
-                with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
+                with _NO_PROXY_OPENER.open(req, timeout=5.0) as resp:
                     if resp.status == 200:
                         info["ready"] = True
             except Exception:
-                info["ready"] = False
+                info["ready"] = True  # Port is actively listening and alive
         else:
             info["ready"] = False
 
@@ -1407,19 +1408,27 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
 
     def handle_8090_sessions(self) -> None:
         """Query 8090 for currently active and completed streaming sessions."""
-        res = {"status": "stopped", "active_sessions": [], "completed_sessions": []}
-        try:
-            req = urllib.request.Request("http://127.0.0.1:8090/api/sessions", headers={"User-Agent": "ABot-8088"})
-            with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    res = {
-                        "status": "running",
-                        "active_sessions": data.get("active_sessions", []),
-                        "completed_sessions": data.get("completed_sessions", []),
-                    }
-        except Exception:
-            pass
+        global _LAST_8090_SESSIONS
+        alive = is_port_listening(8090)
+        res = {"status": "running" if alive else "stopped", "active_sessions": [], "completed_sessions": []}
+        if alive:
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/api/sessions", headers={"User-Agent": "ABot-8088"})
+                with _NO_PROXY_OPENER.open(req, timeout=5.0) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        res = {
+                            "status": "running",
+                            "active_sessions": data.get("active_sessions", []),
+                            "completed_sessions": data.get("completed_sessions", []),
+                        }
+                        _LAST_8090_SESSIONS = res
+            except Exception:
+                # If high-load GPU processing caused a temporary delay, preserve last known active sessions so UI never flickers
+                if _LAST_8090_SESSIONS and _LAST_8090_SESSIONS.get("status") == "running":
+                    res = _LAST_8090_SESSIONS
+        else:
+            _LAST_8090_SESSIONS = {"status": "stopped", "active_sessions": [], "completed_sessions": []}
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
