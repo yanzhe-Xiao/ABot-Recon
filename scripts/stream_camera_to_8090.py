@@ -49,6 +49,7 @@ async def stream_worker(
     max_frames: int = 0,
     loop: bool = False,
     show_preview: bool = False,
+    max_in_flight: int = 2,
 ):
     # Open VideoCapture
     print(f"[*] 正在打开视频源: {source} ...")
@@ -61,7 +62,7 @@ async def stream_worker(
     orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     src_fps = cap.get(cv2.CAP_PROP_FPS) or fps
     print(f"[+] 视频源打开成功! 原始尺寸: {orig_w}x{orig_h}, FPS: {src_fps:.1f}")
-    print(f"[+] 推流目标分辨率: {width}x{height}, 目标推流帧率: {fps:.1f} FPS")
+    print(f"[+] 推流目标分辨率: {width}x{height}, 目标推流帧率: {fps:.1f} FPS, 流水线深度: {max_in_flight}")
 
     # Connect to 8090 WebSocket stream endpoint
     url = (
@@ -82,6 +83,7 @@ async def stream_worker(
 
     delay = 1.0 / max(1.0, fps)
     frames_sent = 0
+    frames_received = 0
     t_start = time.time()
 
     try:
@@ -90,6 +92,47 @@ async def stream_worker(
             handshake_raw = await ws.recv()
             handshake = json.loads(handshake_raw)
             print(f"[+] 8090 服务端握手成功: {handshake}")
+
+            sem = asyncio.Semaphore(max_in_flight)
+            summary_container: dict = {}
+            eos_received = asyncio.Event()
+
+            async def receiver():
+                nonlocal frames_received, summary_container
+                while not eos_received.is_set():
+                    try:
+                        resp_raw = await ws.recv()
+                    except Exception:
+                        break
+                    try:
+                        resp = json.loads(resp_raw)
+                    except Exception:
+                        continue
+
+                    msg_type = resp.get("type")
+                    if msg_type == "frame_result":
+                        sem.release()
+                        frames_received += 1
+                        pose = resp.get("camera_pose", [])
+                        t_xyz = [round(pose[i][3], 2) for i in range(3)] if len(pose) >= 3 else [0, 0, 0]
+                        pts = resp.get("incremental_point_count", 0)
+                        inf_ms = resp.get("inference_time_ms", 0)
+                        r_fps = resp.get("fps", 0)
+                        f_idx = resp.get("frame_idx", frames_received - 1)
+                        dev = resp.get("worker_device", "")
+                        dev_str = f" [{dev}]" if dev else ""
+                        print(
+                            f"\r[Session {session_id}] 帧 #{f_idx+1:04d} | 相机位置: {t_xyz} | "
+                            f"新增点数: +{pts:4d} | 耗时: {inf_ms:4.1f}ms ({r_fps:.1f} FPS){dev_str} | 8088 实时建图中...",
+                            end="",
+                            flush=True,
+                        )
+                    elif msg_type == "session_completed":
+                        summary_container.update(resp)
+                        eos_received.set()
+                        break
+
+            recv_task = asyncio.create_task(receiver())
 
             while True:
                 ret, frame = cap.read()
@@ -115,25 +158,11 @@ async def stream_worker(
                 _, encoded_buf = cv2.imencode('.jpg', frame_resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 jpeg_bytes = encoded_buf.tobytes()
 
-                # Send binary JPEG frame over WebSocket
+                # Acquire pipeline permit to avoid unbounded frame queuing
+                await sem.acquire()
+                # Send binary JPEG frame over WebSocket asynchronously
                 await ws.send(jpeg_bytes)
                 frames_sent += 1
-
-                # Wait for frame processing acknowledgment
-                resp_raw = await ws.recv()
-                resp = json.loads(resp_raw)
-
-                if resp.get("type") == "frame_result":
-                    pose = resp.get("camera_pose", [])
-                    t_xyz = [round(pose[i][3], 2) for i in range(3)] if len(pose) >= 3 else [0, 0, 0]
-                    pts = resp.get("incremental_point_count", 0)
-                    inf_ms = resp.get("inference_time_ms", 0)
-                    print(
-                        f"\r[Session {session_id}] 帧 #{frames_sent:04d} | 相机位置: {t_xyz} | "
-                        f"新增点数: +{pts:4d} | 耗时: {inf_ms:4.1f}ms | 8088 正在实时建图...",
-                        end="",
-                        flush=True,
-                    )
 
                 if show_preview:
                     cv2.putText(
@@ -154,7 +183,7 @@ async def stream_worker(
                     print(f"\n[*] 已达到最大帧数限制: {max_frames}")
                     break
 
-                # Control frame rate
+                # Control frame rate smoothly
                 elapsed_frame = time.time() - t_frame0
                 sleep_sec = delay - elapsed_frame
                 if sleep_sec > 0:
@@ -164,16 +193,20 @@ async def stream_worker(
             print(f"\n[*] 正在发送 End-of-Stream (EOS) 结束信号...")
             await ws.send(json.dumps({"type": "EOS"}))
 
-            # Receive completion summary
-            summary_raw = await ws.recv()
-            summary = json.loads(summary_raw)
+            # Wait for receiver to finish receiving completion summary
+            try:
+                await asyncio.wait_for(recv_task, timeout=30.0)
+            except asyncio.TimeoutError:
+                print("\n[!] 等待 EOS 汇总响应超时")
+
+            summary = summary_container
             total_duration = time.time() - t_start
             print("\n" + "=" * 65)
             print("🎉 3D 建图会话结束！交付成果清单:")
-            print(f" - 总推流帧数: {frames_sent} 帧")
+            print(f" - 总推流帧数: {frames_sent} 帧 (已确认: {frames_received} 帧)")
             print(f" - 总建图点数: {summary.get('total_points', 0):,} 点")
             print(f" - 耗时: {total_duration:.1f} 秒 (实际推流 FPS: {frames_sent / max(0.1, total_duration):.1f})")
-            print(f" - PLY 点云保存路径: {summary.get('ply_path', 'N/A')}")
+            print(f" - PLY 点云保存路径: {summary.get('deliverables', {}).get('ply_path', summary.get('ply_path', 'N/A'))}")
             print(f" - 8088 场景查看地址: http://127.0.0.1:8088/outputs/streams/{session_id}/stream_reconstruction.ply")
             print("=" * 65 + "\n")
 
@@ -242,6 +275,12 @@ def main():
         action="store_true",
         help="是否开启本地 OpenCV 视频预览窗口",
     )
+    parser.add_argument(
+        "--max-in-flight",
+        type=int,
+        default=2,
+        help="异步流水线最大在途帧数 (默认: 2，有效解除停等延迟瓶颈)",
+    )
 
     args = parser.parse_args()
     source = parse_source(args.source)
@@ -257,6 +296,7 @@ def main():
             max_frames=args.max_frames,
             loop=args.loop,
             show_preview=args.preview,
+            max_in_flight=args.max_in_flight,
         )
     )
 

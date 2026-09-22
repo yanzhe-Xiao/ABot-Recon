@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import copy
 import io
 import json
@@ -114,8 +115,149 @@ class AlignedDynamicMaskGenerator:
 
         return dyn_mask == 0
 # ---------------------------------------------------------------------------
-# Session Data Structure
+# Session Data Structure & Device Worker
 # ---------------------------------------------------------------------------
+def parse_devices(devices_arg: Optional[str | List[str]]) -> List[str]:
+    """Parse device specification into normalized torch device strings.
+    
+    Supports:
+      - None / "" / "auto" / "all": all available CUDA devices, or ["cpu"]
+      - "cuda:0,cuda:1" or ["cuda:0", "cuda:1"]: explicit multi-GPU
+      - "cuda:0" or "cpu": single device
+    """
+    if not torch.cuda.is_available():
+        return ["cpu"]
+    if devices_arg is None or devices_arg == "" or str(devices_arg).lower() in ("auto", "all"):
+        count = torch.cuda.device_count()
+        if count > 0:
+            return [f"cuda:{i}" for i in range(count)]
+        return ["cpu"]
+    if isinstance(devices_arg, list):
+        return [str(d) for d in devices_arg]
+    if isinstance(devices_arg, str):
+        parts = [p.strip() for p in devices_arg.split(",") if p.strip()]
+        result = []
+        for p in parts:
+            if p.isdigit():
+                result.append(f"cuda:{p}")
+            elif p.startswith("cuda") or p == "cpu":
+                result.append(p)
+            else:
+                result.append(p)
+        return result if result else ["cuda:0"]
+    return [str(devices_arg)]
+
+
+def _sync_preprocess_frame(image_bytes_or_pil: bytes | Image.Image | np.ndarray) -> Tuple[Image.Image, torch.Tensor, np.ndarray]:
+    """CPU-bound preprocessing of an incoming frame: decode & normalize (runs in thread pool)."""
+    if isinstance(image_bytes_or_pil, bytes):
+        pil_img = Image.open(io.BytesIO(image_bytes_or_pil)).convert("RGB")
+    elif isinstance(image_bytes_or_pil, np.ndarray):
+        pil_img = Image.fromarray(image_bytes_or_pil).convert("RGB")
+    elif isinstance(image_bytes_or_pil, Image.Image):
+        pil_img = image_bytes_or_pil.convert("RGB")
+    else:
+        raise ValueError(f"Unsupported image type: {type(image_bytes_or_pil)}")
+
+    tensor_chw, _ = preprocess_image(pil_img, height=280, width=504)
+    rgb_full = (tensor_chw.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8).numpy()
+    return pil_img, tensor_chw, rgb_full
+
+
+def _sync_postprocess_slice(
+    raw_world: torch.Tensor,
+    conf_map: torch.Tensor,
+    static_mask: Optional[np.ndarray],
+    tensor_chw: torch.Tensor,
+    point_stride: int,
+    confidence_threshold: float,
+    need_thumbnail: bool,
+    pil_img: Optional[Image.Image],
+) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
+    """CPU-bound downsampling, mask filtering, and optional thumbnail generation (runs in thread pool)."""
+    stride = point_stride
+    thresh = confidence_threshold
+
+    sampled_pts = raw_world[::stride, ::stride].reshape(-1, 3).numpy()
+    sampled_conf = conf_map[::stride, ::stride].reshape(-1).numpy()
+    valid = np.isfinite(sampled_pts).all(axis=-1)
+    if thresh > 0:
+        valid &= sampled_conf >= thresh
+    if static_mask is not None:
+        sampled_static = static_mask[::stride, ::stride].reshape(-1)
+        valid &= sampled_static
+
+    valid_pts = sampled_pts[valid].astype(np.float32)
+    rgb_arr = (tensor_chw.permute(1, 2, 0)[::stride, ::stride].reshape(-1, 3).numpy() * 255).astype(np.uint8)
+    valid_rgb = rgb_arr[valid]
+
+    thumb_b64 = None
+    if need_thumbnail and pil_img is not None:
+        try:
+            thumb_io = io.BytesIO()
+            pil_img.resize((280, 157), Image.Resampling.BILINEAR).save(thumb_io, format="JPEG", quality=55)
+            thumb_b64 = "data:image/jpeg;base64," + base64.b64encode(thumb_io.getvalue()).decode("ascii")
+        except Exception:
+            thumb_b64 = None
+
+    return valid_pts, valid_rgb, thumb_b64
+
+
+class DeviceWorker:
+    """Encapsulates a model instance, PagedKV cache template, and dedicated GPU lock on one device."""
+
+    def __init__(
+        self,
+        worker_id: int,
+        device_str: str,
+        checkpoint: str | Path = "checkpoints/abot_recon.safetensors",
+        dynamic_filter: bool = True,
+        dynamic_model: str = "yolo11n-seg.pt",
+        dynamic_conf: float = 0.12,
+        dynamic_dilate: int = 7,
+    ):
+        self.worker_id = worker_id
+        self.device = torch.device(device_str)
+        self.gpu_lock = asyncio.Lock()
+        self.active_sessions: Set[str] = set()
+
+        cuda_ctx = torch.cuda.device(self.device) if self.device.type == "cuda" else contextlib.nullcontext()
+        with cuda_ctx:
+            print(f"[DeviceWorker-{worker_id}] Loading ABot-Recon model on {self.device}...")
+            self.model = ABotRecon.from_pretrained(
+                checkpoint,
+                device=str(self.device),
+                attention_backend="paged",
+            )
+            self.network = self.model.model.network
+            self.compute_dtype = self.model.model.compute_dtype
+
+            # Template paged manager for resolution 280x504
+            self.network._ensure_paged_manager(
+                H=280,
+                W=504,
+                dtype=self.compute_dtype if self.compute_dtype != torch.float32 else torch.bfloat16,
+                device=self.device,
+            )
+            self.paged_template = self.network._paged_manager
+
+            self.mask_generator: Optional[AlignedDynamicMaskGenerator] = None
+            if dynamic_filter and HAS_ULTRALYTICS:
+                try:
+                    self.mask_generator = AlignedDynamicMaskGenerator(
+                        model_name=dynamic_model,
+                        conf_thresh=dynamic_conf,
+                        dilate_kernel=dynamic_dilate,
+                        device=str(self.device),
+                    )
+                    print(f"[DeviceWorker-{worker_id}] Dynamic mask generator ({dynamic_model}) ready on {self.device}.")
+                except Exception as e:
+                    print(f"[DeviceWorker-{worker_id}] Notice: dynamic mask generator not initialized: {e}")
+                    self.mask_generator = None
+
+        print(f"[DeviceWorker-{worker_id}] Worker ready on {self.device}.")
+
+
 @dataclass
 class StreamSession:
     session_id: str
@@ -130,6 +272,8 @@ class StreamSession:
     save_trajectory: bool = True
     auto_fuse: bool = True
     dynamic_filter: bool = False
+    dynamic_interval: int = 2
+    last_static_mask: Optional[np.ndarray] = None
     frame_counter: int = 0  # Total frames received
     processed_counter: int = 0  # Frames actually forwarded through model
     created_at: float = field(default_factory=time.time)
@@ -140,6 +284,7 @@ class StreamSession:
     ref_hidden: Optional[torch.Tensor] = None
     camera_state: Optional[Dict[str, torch.Tensor]] = None
     paged_manager: Any = None  # Session-specific FlashInfer PagedKVCacheManager
+    worker: Optional[DeviceWorker] = None  # Assigned DeviceWorker
 
     # Global accumulated history
     history_poses: List[np.ndarray] = field(default_factory=list)
@@ -169,27 +314,31 @@ class StreamSession:
 # Multi-Client Session Manager
 # ---------------------------------------------------------------------------
 class MultiSessionReconstructionManager:
-    """Thread-safe and async-safe concurrent multi-stream session coordinator."""
+    """Thread-safe and async-safe concurrent multi-stream session coordinator with multi-GPU pool."""
 
     def __init__(
         self,
         checkpoint: str | Path = "checkpoints/abot_recon.safetensors",
-        device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
+        devices: Optional[str | List[str]] = None,
+        device: Optional[str] = None,  # Backwards compatibility
         output_base_dir: Path = REPO_ROOT / "outputs/streams",
         scenes_base_dir: Path = REPO_ROOT / "outputs/scenes",
         dynamic_filter: bool = True,
-        dynamic_model: str = "yolo11m-seg.pt",
+        dynamic_model: str = "yolo11n-seg.pt",
         dynamic_conf: float = 0.12,
-        dynamic_dilate: int = 15,
+        dynamic_dilate: int = 7,
+        dynamic_interval: int = 2,
     ):
-        self.device = torch.device(device)
+        dev_arg = devices if devices is not None else device
+        target_devices = parse_devices(dev_arg)
+        print(f"[Server Engine] Initializing MultiSessionReconstructionManager across device(s): {target_devices}")
+
         self.output_base_dir = output_base_dir
         self.output_base_dir.mkdir(parents=True, exist_ok=True)
         self.scenes_base_dir = scenes_base_dir
         self.scenes_base_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, StreamSession] = {}
         self.subscribers: Dict[str, Set[asyncio.Queue]] = defaultdict(set)
-        self.gpu_lock = asyncio.Lock()
         self.meta_lock = asyncio.Lock()
         self.scene_locks: Dict[str, asyncio.Lock] = {}
         self.scene_dirty: Dict[str, bool] = {}
@@ -197,32 +346,32 @@ class MultiSessionReconstructionManager:
         self.dynamic_model = dynamic_model
         self.dynamic_conf = dynamic_conf
         self.dynamic_dilate = dynamic_dilate
-        self.mask_generator: Optional[AlignedDynamicMaskGenerator] = None
-        if self.dynamic_filter:
-            self.mask_generator = AlignedDynamicMaskGenerator(
-                model_name=self.dynamic_model,
-                conf_thresh=self.dynamic_conf,
-                dilate_kernel=self.dynamic_dilate,
-                device=str(self.device),
-            )
-        print(f"[Server Engine] Loading ABot-Recon model on {self.device}...")
-        self.model = ABotRecon.from_pretrained(
-            checkpoint,
-            device=str(self.device),
-            attention_backend="paged",
-        )
-        self.network = self.model.model.network
-        self.compute_dtype = self.model.model.compute_dtype
+        self.dynamic_interval = max(1, int(dynamic_interval))
 
-        # Template paged manager for resolution 280x504
-        self.network._ensure_paged_manager(
-            H=280,
-            W=504,
-            dtype=self.compute_dtype if self.compute_dtype != torch.float32 else torch.bfloat16,
-            device=self.device,
-        )
-        self.paged_template = self.network._paged_manager
-        print("[Server Engine] Model initialized and paged KV cache template ready.")
+        # Initialize DeviceWorkers across all specified devices
+        self.workers: List[DeviceWorker] = []
+        for i, dev_str in enumerate(target_devices):
+            worker = DeviceWorker(
+                worker_id=i,
+                device_str=dev_str,
+                checkpoint=checkpoint,
+                dynamic_filter=dynamic_filter,
+                dynamic_model=dynamic_model,
+                dynamic_conf=dynamic_conf,
+                dynamic_dilate=dynamic_dilate,
+            )
+            self.workers.append(worker)
+
+        # Primary device / worker for backwards compatibility
+        self.primary_worker = self.workers[0]
+        self.device = self.primary_worker.device
+        self.gpu_lock = self.primary_worker.gpu_lock
+        self.model = self.primary_worker.model
+        self.network = self.primary_worker.network
+        self.compute_dtype = self.primary_worker.compute_dtype
+        self.paged_template = self.primary_worker.paged_template
+        self.mask_generator = self.primary_worker.mask_generator
+        print(f"[Server Engine] Multi-GPU pool ready with {len(self.workers)} worker(s).")
 
     def add_subscriber(self, session_id: str, queue: asyncio.Queue) -> None:
         """Register a real-time observer queue for an active session or '*' for all sessions."""
@@ -444,6 +593,7 @@ class MultiSessionReconstructionManager:
         save_trajectory: bool = True,
         auto_fuse: bool = True,
         dynamic_filter: Optional[bool] = None,
+        dynamic_interval: Optional[int] = None,
     ) -> StreamSession:
         effective_scene_id = scene_id.strip() if scene_id and scene_id.strip() else session_id
         if session_id in self.sessions:
@@ -458,13 +608,23 @@ class MultiSessionReconstructionManager:
             session.auto_fuse = auto_fuse
             if dynamic_filter is not None:
                 session.dynamic_filter = bool(dynamic_filter)
+            if dynamic_interval is not None:
+                session.dynamic_interval = max(1, int(dynamic_interval))
             session.last_active = time.time()
             self.register_session_to_scene(session_id, effective_scene_id)
             return session
 
-        # Create fresh isolated paged manager
-        paged_mgr = copy.deepcopy(self.paged_template)
-        paged_mgr.reset()
+        # Select least loaded worker from device pool
+        worker = min(self.workers, key=lambda w: len(w.active_sessions))
+        worker.active_sessions.add(session_id)
+
+        # Create fresh isolated paged manager from selected worker's template within device context
+        cuda_ctx = torch.cuda.device(worker.device) if worker.device.type == "cuda" else contextlib.nullcontext()
+        with cuda_ctx:
+            paged_mgr = copy.deepcopy(worker.paged_template)
+            paged_mgr.reset()
+
+        effective_interval = dynamic_interval if dynamic_interval is not None else self.dynamic_interval
 
         session = StreamSession(
             session_id=session_id,
@@ -478,7 +638,9 @@ class MultiSessionReconstructionManager:
             save_trajectory=save_trajectory,
             auto_fuse=auto_fuse,
             dynamic_filter=self.dynamic_filter if dynamic_filter is None else bool(dynamic_filter),
+            dynamic_interval=effective_interval,
             paged_manager=paged_mgr,
+            worker=worker,
         )
         self.sessions[session_id] = session
         self.register_session_to_scene(session_id, effective_scene_id)
@@ -488,8 +650,9 @@ class MultiSessionReconstructionManager:
             "scene_id": effective_scene_id,
             "robot": session.robot,
             "folder_name": session.folder_name,
+            "worker_device": str(worker.device),
         })
-        print(f"[Session] Created new session [{session_id}] for scene [{effective_scene_id}] (folder: {session.folder_name}, active: {len(self.sessions)})")
+        print(f"[Session] Created new session [{session_id}] on {worker.device} for scene [{effective_scene_id}] (folder: {session.folder_name}, active on device: {len(worker.active_sessions)}, total active: {len(self.sessions)})")
         return session
 
     async def process_frame(
@@ -498,7 +661,7 @@ class MultiSessionReconstructionManager:
         image_bytes_or_pil: bytes | Image.Image | np.ndarray,
         include_point_data: bool = True,
     ) -> Dict[str, Any]:
-        """Process one video frame for a specific session."""
+        """Process one video frame for a specific session with CPU offloading and per-worker GPU locking."""
         session.last_active = time.time()
         session.frame_counter += 1
 
@@ -513,58 +676,74 @@ class MultiSessionReconstructionManager:
 
         t0 = time.perf_counter()
 
-        # 1. Image Preprocessing (CPU, parallelizable)
-        if isinstance(image_bytes_or_pil, bytes):
-            pil_img = Image.open(io.BytesIO(image_bytes_or_pil)).convert("RGB")
-        elif isinstance(image_bytes_or_pil, np.ndarray):
-            pil_img = Image.fromarray(image_bytes_or_pil).convert("RGB")
-        elif isinstance(image_bytes_or_pil, Image.Image):
-            pil_img = image_bytes_or_pil.convert("RGB")
-        else:
-            raise ValueError(f"Unsupported image type: {type(image_bytes_or_pil)}")
+        # 1. Image Preprocessing (Async CPU offload - parallel across CPU cores)
+        pil_img, tensor_chw, rgb_full = await asyncio.to_thread(
+            _sync_preprocess_frame, image_bytes_or_pil
+        )
 
-        tensor_chw, _ = preprocess_image(pil_img, height=280, width=504)
-        frame = tensor_chw.unsqueeze(0).unsqueeze(0).to(self.device)
-        if self.compute_dtype != torch.float32 and self.device.type == "cuda":
-            frame = frame.to(self.compute_dtype)
+        worker = session.worker or self.primary_worker
+        cuda_ctx = torch.cuda.device(worker.device) if worker.device.type == "cuda" else contextlib.nullcontext()
 
-        # 2. Forward Inference (Protected by GPU lock for multi-session safety)
-        async with self.gpu_lock:
-            # Swap in this session's isolated KV cache manager
-            self.network._paged_manager = session.paged_manager
+        with cuda_ctx:
+            frame = tensor_chw.unsqueeze(0).unsqueeze(0).to(worker.device)
+            if worker.compute_dtype != torch.float32 and worker.device.type == "cuda":
+                frame = frame.to(worker.compute_dtype)
 
-            with torch.inference_mode(), torch.autocast(
-                device_type="cuda" if self.device.type == "cuda" else "cpu",
-                dtype=self.compute_dtype,
-                enabled=(self.compute_dtype != torch.float32),
-            ):
-                pred = self.network._forward_frame_paged(
-                    frame,
-                    frame_idx=session.processed_counter,
-                    ref_hidden=session.ref_hidden,
-                    camera_state=session.camera_state,
-                )
+        # 2. Forward Inference (Protected by per-device GPU lock)
+        async with worker.gpu_lock:
+            with cuda_ctx:
+                # Swap in this session's isolated KV cache manager
+                worker.network._paged_manager = session.paged_manager
 
-            # Update session recurrent states
-            if pred.get("ref_hidden") is not None:
-                session.ref_hidden = pred["ref_hidden"]
-            session.camera_state = pred.get("camera_state", session.camera_state)
+                with torch.inference_mode(), torch.autocast(
+                    device_type="cuda" if worker.device.type == "cuda" else "cpu",
+                    dtype=worker.compute_dtype,
+                    enabled=(worker.compute_dtype != torch.float32),
+                ):
+                    pred = worker.network._forward_frame_paged(
+                        frame,
+                        frame_idx=session.processed_counter,
+                        ref_hidden=session.ref_hidden,
+                        camera_state=session.camera_state,
+                    )
 
-            # Extract outputs
-            raw_pose = pred["camera_poses"][0, 0].detach().float().cpu().numpy()
-            raw_world = pred["points"][0, 0].detach().float().cpu()  # (280, 504, 3)
+                # Update session recurrent states
+                if pred.get("ref_hidden") is not None:
+                    session.ref_hidden = pred["ref_hidden"]
+                session.camera_state = pred.get("camera_state", session.camera_state)
 
-            conf_logits = pred.get("conf")
-            if conf_logits is not None:
-                if conf_logits.ndim == 5 and conf_logits.shape[-1] == 1:
-                    conf_logits = conf_logits[..., 0]
-                conf_map = torch.sigmoid(conf_logits[0, 0].detach().float().cpu())
-            else:
-                conf_map = torch.ones((280, 504), dtype=torch.float32)
+                # Extract outputs and immediately transfer to CPU
+                raw_pose = pred["camera_poses"][0, 0].detach().float().cpu().numpy()
+                raw_world = pred["points"][0, 0].detach().float().cpu()  # (280, 504, 3)
 
-        # 3. Postprocess Slice
+                conf_logits = pred.get("conf")
+                if conf_logits is not None:
+                    if conf_logits.ndim == 5 and conf_logits.shape[-1] == 1:
+                        conf_logits = conf_logits[..., 0]
+                    conf_map = torch.sigmoid(conf_logits[0, 0].detach().float().cpu())
+                else:
+                    conf_map = torch.ones((280, 504), dtype=torch.float32)
+
+        # 3. Dynamic Mask Generation (Temporal reuse + async offload)
         current_idx = session.processed_counter
         session.processed_counter += 1
+
+        static_mask = None
+        if session.dynamic_filter and worker.mask_generator is not None:
+            # Temporal reuse: run YOLO every dynamic_interval frames
+            if (
+                session.dynamic_interval > 1
+                and session.last_static_mask is not None
+                and (current_idx % session.dynamic_interval != 0)
+            ):
+                static_mask = session.last_static_mask
+            else:
+                def _predict_mask_sync(arr):
+                    with cuda_ctx:
+                        return worker.mask_generator.predict_single(arr)
+                static_mask = await asyncio.to_thread(_predict_mask_sync, rgb_full)
+                session.last_static_mask = static_mask
+            session.history_static_masks.append(torch.from_numpy(static_mask))
 
         session.history_poses.append(raw_pose)
         session.history_points.append(raw_world)
@@ -573,36 +752,30 @@ class MultiSessionReconstructionManager:
             (tensor_chw.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8)
         )
 
-        static_mask = None
-        if session.dynamic_filter:
-            if self.mask_generator is None:
-                self.mask_generator = AlignedDynamicMaskGenerator(
-                    model_name=self.dynamic_model,
-                    conf_thresh=self.dynamic_conf,
-                    dilate_kernel=self.dynamic_dilate,
-                    device=str(self.device),
-                )
-            rgb_full = (tensor_chw.permute(1, 2, 0).clamp(0, 1) * 255).round().to(torch.uint8).numpy()
-            static_mask = self.mask_generator.predict_single(rgb_full)
-            session.history_static_masks.append(torch.from_numpy(static_mask))
+        # Check whether real-time 3D observers are listening
+        has_subscribers = bool(self.subscribers.get(session.session_id) or self.subscribers.get("*"))
+        need_thumbnail = has_subscribers
 
-        stride = session.point_stride
-        thresh = session.confidence_threshold
+        # 4. CPU Postprocess Slice (Async offload)
+        valid_pts, valid_rgb, thumb_b64 = await asyncio.to_thread(
+            _sync_postprocess_slice,
+            raw_world=raw_world,
+            conf_map=conf_map,
+            static_mask=static_mask,
+            tensor_chw=tensor_chw,
+            point_stride=session.point_stride,
+            confidence_threshold=session.confidence_threshold,
+            need_thumbnail=need_thumbnail,
+            pil_img=pil_img,
+        )
 
-        sampled_pts = raw_world[::stride, ::stride].reshape(-1, 3).numpy()
-        sampled_conf = conf_map[::stride, ::stride].reshape(-1).numpy()
-        valid = np.isfinite(sampled_pts).all(axis=-1)
-        if thresh > 0:
-            valid &= sampled_conf >= thresh
-        if static_mask is not None:
-            sampled_static = static_mask[::stride, ::stride].reshape(-1)
-            valid &= sampled_static
-
-        valid_pts = sampled_pts[valid].astype(np.float32)
-        rgb_arr = (tensor_chw.permute(1, 2, 0)[::stride, ::stride].reshape(-1, 3).numpy() * 255).astype(np.uint8)
-        valid_rgb = rgb_arr[valid]
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         total_pts_approx = session.processed_counter * len(valid_pts)
+
+        # Store in session sampled history for late-joining snapshot catchup
+        session.sampled_history_points.append(valid_pts)
+        session.sampled_history_colors.append(valid_rgb)
+        session.latest_thumbnail = thumb_b64
 
         result: Dict[str, Any] = {
             "type": "frame_result",
@@ -615,32 +788,30 @@ class MultiSessionReconstructionManager:
             "total_points_approx": total_pts_approx,
             "inference_time_ms": round(elapsed_ms, 2),
             "fps": round(1000.0 / elapsed_ms, 2) if elapsed_ms > 0 else 0.0,
+            "worker_device": str(worker.device),
         }
+
+        # Convert points to list ONLY when requested by client or subscribers
+        points_xyz_list = None
+        points_rgb_list = None
+
         if include_point_data:
-            result["points_xyz"] = valid_pts.tolist()
-            result["points_rgb"] = valid_rgb.tolist()
-
-        # Generate lightweight JPEG thumbnail for live HUD visualization
-        thumb_b64 = None
-        try:
-            thumb_io = io.BytesIO()
-            pil_img.resize((280, 157), Image.Resampling.BILINEAR).save(thumb_io, format="JPEG", quality=55)
-            thumb_b64 = "data:image/jpeg;base64," + base64.b64encode(thumb_io.getvalue()).decode("ascii")
+            points_xyz_list = valid_pts.tolist()
+            points_rgb_list = valid_rgb.tolist()
+            result["points_xyz"] = points_xyz_list
+            result["points_rgb"] = points_rgb_list
             result["thumbnail"] = thumb_b64
-        except Exception:
-            result["thumbnail"] = None
 
-        # Store in session sampled history for late-joining snapshot catchup
-        session.sampled_history_points.append(valid_pts)
-        session.sampled_history_colors.append(valid_rgb)
-        session.latest_thumbnail = thumb_b64
+        if has_subscribers:
+            if points_xyz_list is None:
+                points_xyz_list = valid_pts.tolist()
+                points_rgb_list = valid_rgb.tolist()
+            broadcast_payload = dict(result)
+            broadcast_payload["points_xyz"] = points_xyz_list
+            broadcast_payload["points_rgb"] = points_rgb_list
+            broadcast_payload["thumbnail"] = thumb_b64
+            self.broadcast_to_subscribers(session.session_id, broadcast_payload)
 
-        # Real-time broadcast to all attached viewers (always ensure 3D points are included for 3D viewers)
-        broadcast_payload = dict(result)
-        broadcast_payload["points_xyz"] = valid_pts.tolist()
-        broadcast_payload["points_rgb"] = valid_rgb.tolist()
-        broadcast_payload["thumbnail"] = thumb_b64
-        self.broadcast_to_subscribers(session.session_id, broadcast_payload)
         return result
 
     async def finalize_session(self, session_id: str) -> Dict[str, Any]:
@@ -650,6 +821,8 @@ class MultiSessionReconstructionManager:
 
         session = self.sessions[session_id]
         session.is_active = False
+        if session.worker is not None:
+            session.worker.active_sessions.discard(session_id)
         t0 = time.time()
         session_dir = self.output_base_dir / session.folder_name
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1362,8 +1535,8 @@ _MANAGER: Optional[MultiSessionReconstructionManager] = None
 def get_manager() -> MultiSessionReconstructionManager:
     global _MANAGER
     if _MANAGER is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        _MANAGER = MultiSessionReconstructionManager(device=device)
+        devices = "auto" if torch.cuda.is_available() else "cpu"
+        _MANAGER = MultiSessionReconstructionManager(devices=devices)
     return _MANAGER
 
 
@@ -1405,9 +1578,10 @@ async def websocket_stream(
     frame_stride: int = Query(1, description="Process 1 frame every N frames"),
     voxel_size: float = Query(0.015, description="Final spatial voxel grid size in meters"),
     confidence_threshold: float = Query(0.1, description="Confidence threshold for points [0, 1]"),
-    include_points: bool = Query(True, description="Whether to include point coordinates in frame response"),
+    include_points: bool = Query(False, description="Whether to include point coordinates in frame response (default False for high FPS)"),
     auto_fuse: bool = Query(True, description="Automatically fuse with existing completed streams in the same scene on EOS"),
     dynamic_filter: Optional[bool] = Query(None, description="Enable real-time dynamic object removal (YOLO-seg)"),
+    dynamic_interval: Optional[int] = Query(None, description="Interval frames for dynamic object detection (default: 2)"),
 ):
     await websocket.accept()
     manager = get_manager()
@@ -1421,6 +1595,7 @@ async def websocket_stream(
         confidence_threshold=confidence_threshold,
         auto_fuse=auto_fuse,
         dynamic_filter=dynamic_filter,
+        dynamic_interval=dynamic_interval,
     )
 
     # Initial handshake acknowledgement
@@ -1958,26 +2133,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ABot-Recon Real-time Video Stream API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8090)
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--devices", "--device", dest="devices", type=str, default="auto" if torch.cuda.is_available() else "cpu", help="Compute devices (e.g. 'auto', 'cuda:0', 'cuda:0,cuda:1')")
     parser.add_argument(
         "--dynamic-filter",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable real-time 2D dynamic object removal (YOLO-seg) by default",
     )
-    parser.add_argument("--dynamic-model", type=str, default="yolo11m-seg.pt", help="YOLO segmentation model")
+    parser.add_argument("--dynamic-model", type=str, default="yolo11n-seg.pt", help="YOLO segmentation model (default: yolo11n-seg.pt)")
     parser.add_argument("--dynamic-conf", type=float, default=0.12, help="Confidence threshold for dynamic object detection")
-    parser.add_argument("--dynamic-dilate", type=int, default=15, help="Dilation kernel size in pixels")
+    parser.add_argument("--dynamic-dilate", type=int, default=7, help="Dilation kernel size in pixels (default: 7)")
+    parser.add_argument("--dynamic-interval", type=int, default=2, help="Interval frames for dynamic object detection (default: 2, 1=every frame)")
     args = parser.parse_args()
 
     # Pre-init manager
     global _MANAGER
     _MANAGER = MultiSessionReconstructionManager(
-        device=args.device,
+        devices=args.devices,
         dynamic_filter=args.dynamic_filter,
         dynamic_model=args.dynamic_model,
         dynamic_conf=args.dynamic_conf,
         dynamic_dilate=args.dynamic_dilate,
+        dynamic_interval=args.dynamic_interval,
     )
     print(f"\n==================================================================")
     print(f"  ABot-Recon Streaming Server Running on http://{args.host}:{args.port}")

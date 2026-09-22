@@ -55,29 +55,52 @@ async def stream_camera(
 
         t_start = time.time()
         frames_sent = 0
+        frames_received = 0
+        sem = asyncio.Semaphore(2)
+        summary_container: dict = {}
+        eos_received = asyncio.Event()
 
-        # 2. Continuous frame streaming
+        async def receiver():
+            nonlocal frames_received, summary_container
+            while not eos_received.is_set():
+                try:
+                    resp_raw = await ws.recv()
+                except Exception:
+                    break
+                try:
+                    resp = json.loads(resp_raw)
+                except Exception:
+                    continue
+
+                msg_type = resp.get("type")
+                if msg_type == "frame_result":
+                    sem.release()
+                    frames_received += 1
+                    pose = resp["camera_pose"]
+                    t_vec = [round(pose[i][3], 3) for i in range(3)]
+                    dev = resp.get("worker_device", "")
+                    dev_str = f" [{dev}]" if dev else ""
+                    print(
+                        f"[{session_id}] Frame {resp['frame_idx']:03d} -> Pose t={t_vec}, "
+                        f"pts={resp['incremental_point_count']:,}, "
+                        f"latency={resp['inference_time_ms']:.1f}ms, fps={resp['fps']:.1f}{dev_str}"
+                    )
+                elif msg_type == "session_completed":
+                    summary_container.update(resp)
+                    eos_received.set()
+                    break
+
+        recv_task = asyncio.create_task(receiver())
+
+        # 2. Continuous frame streaming (pipelined)
         for idx, img_path in enumerate(image_paths):
             with open(img_path, "rb") as f:
                 img_bytes = f.read()
 
             t_send0 = time.time()
-            # Send raw binary JPEG
+            await sem.acquire()
             await ws.send(img_bytes)
             frames_sent += 1
-
-            # Receive per-frame real-time feedback
-            resp_raw = await ws.recv()
-            resp = json.loads(resp_raw)
-
-            if resp.get("type") == "frame_result":
-                pose = resp["camera_pose"]
-                t_vec = [round(pose[i][3], 3) for i in range(3)]
-                print(
-                    f"[{session_id}] Frame {resp['frame_idx']:03d} -> Pose t={t_vec}, "
-                    f"pts={resp['incremental_point_count']:,}, "
-                    f"latency={resp['inference_time_ms']:.1f}ms, fps={resp['fps']:.1f}"
-                )
 
             # Throttle to simulate real-world camera recording FPS
             sleep_time = delay - (time.time() - t_send0)
@@ -87,19 +110,22 @@ async def stream_camera(
         # 3. Explicit End-of-Stream (EOS) Signaling
         print(f"\n[{session_id}] Video ended! Sending End-of-Stream ({eos_method})...")
         if eos_method == "json":
-            # Protocol Option 1: Send text EOS
             await ws.send(json.dumps({"type": "EOS"}))
         else:
-            # Protocol Option 2: Send binary EOS token
             await ws.send(b"EOS\x00\x00")
 
         # 4. Receive Final Completion Summary
-        summary_raw = await ws.recv()
-        summary = json.loads(summary_raw)
+        try:
+            await asyncio.wait_for(recv_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            print(f"[{session_id}] Timeout waiting for EOS summary")
+
+        summary = summary_container
         elapsed = time.time() - t_start
         print(f"\n{'='*60}")
         print(f"[{session_id}] STREAM COMPLETED successfully!")
         print(f"  Duration:           {elapsed:.2f}s")
+        print(f"  Frames sent:        {frames_sent}")
         print(f"  Frames processed:   {summary.get('total_frames_processed')}")
         print(f"  Raw points:         {summary.get('raw_point_count'):,}")
         print(f"  Dedup points:       {summary.get('dedup_point_count'):,}")
