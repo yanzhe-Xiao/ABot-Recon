@@ -243,8 +243,9 @@ start_8090() {
     echo -e "       Python: ${PYTHON_BIN}"
     echo -e "       Log   : ${LOG_FILE_8090}"
 
-    nohup "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --device "$device" --dynamic-filter --dynamic-model yolo11m-seg.pt --dynamic-conf 0.12 --dynamic-dilate 15 > "$LOG_FILE_8090" 2>&1 &
+    setsid "$PYTHON_BIN" viewer/streaming_api_server.py --host "$host" --port "$port" --device "$device" --dynamic-filter --dynamic-model yolo11m-seg.pt --dynamic-conf 0.12 --dynamic-dilate 15 > "$LOG_FILE_8090" 2>&1 &
     local pid=$!
+    disown "$pid" 2>/dev/null || true
     echo "$pid" > "$PID_FILE_8090"
 
     # 等待验证启动 (最多等待 15 秒)

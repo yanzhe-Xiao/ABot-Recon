@@ -39,6 +39,7 @@ from viewer.stream_backend import OnlineReconstructionEngine
 _COLORS_CACHE: Dict[str, torch.Tensor] = {}
 # In-memory cache for dynamic replay buffers (max 6 models)
 _REPLAY_CACHE: Dict[str, bytes] = {}
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def load_colors_tensor(dir_or_file: Path) -> Optional[torch.Tensor]:
     """Load colors.pt from directory or parent directory with caching."""
@@ -810,6 +811,16 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/scenes":
             return self.handle_scenes_list()
 
+        # 8090 Real-time Stream Relay Endpoints
+        if path in ("/api/8090/sessions", "/api/live_streams"):
+            return self.handle_8090_sessions()
+        if path in ("/api/8090/live", "/api/stream/8090"):
+            return self.handle_8090_live_sse(parsed_url.query)
+        if path == "/api/8090/status":
+            return self.handle_8090_status()
+        if path == "/api/8090/snapshot":
+            return self.handle_8090_snapshot(parsed_url.query)
+
         return super().do_GET()
 
     def do_POST(self) -> None:
@@ -1372,6 +1383,104 @@ class StreamingRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(results, ensure_ascii=False).encode("utf-8"))
 
+
+    def handle_8090_status(self) -> None:
+        """Check whether 8090 streaming engine is listening and operational."""
+        alive = is_port_listening(8090)
+        info = {"running": alive, "port": 8090}
+        if alive:
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8090/", headers={"User-Agent": "ABot-8088"})
+                with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        info["ready"] = True
+            except Exception:
+                info["ready"] = False
+        else:
+            info["ready"] = False
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(info).encode("utf-8"))
+
+    def handle_8090_sessions(self) -> None:
+        """Query 8090 for currently active and completed streaming sessions."""
+        res = {"status": "stopped", "active_sessions": [], "completed_sessions": []}
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8090/api/sessions", headers={"User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    res = {
+                        "status": "running",
+                        "active_sessions": data.get("active_sessions", []),
+                        "completed_sessions": data.get("completed_sessions", []),
+                    }
+        except Exception:
+            pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(res, ensure_ascii=False).encode("utf-8"))
+
+    def handle_8090_live_sse(self, query_string: str) -> None:
+        """Relay real-time 8090 SSE events to the browser client on 8088."""
+        params = urllib.parse.parse_qs(query_string)
+        session_id = params.get("session_id", [""])[0]
+
+        target_url = "http://127.0.0.1:8090/api/stream/live"
+        if session_id:
+            target_url += f"/{urllib.parse.quote(session_id)}"
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        try:
+            req = urllib.request.Request(target_url, headers={"Accept": "text/event-stream", "User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=3600) as resp:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    self.wfile.write(line)
+                    if line == b"\n":
+                        self.wfile.flush()
+        except Exception as e:
+            try:
+                err_data = f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                self.wfile.write(err_data.encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass
+
+    def handle_8090_snapshot(self, query_string: str) -> None:
+        """Relay session 3D reconstruction snapshot from 8090."""
+        params = urllib.parse.parse_qs(query_string)
+        session_id = params.get("session_id", [""])[0]
+        if not session_id:
+            self.send_error(400, "Missing session_id parameter")
+            return
+        target_url = f"http://127.0.0.1:8090/api/stream/snapshot/{urllib.parse.quote(session_id)}"
+        try:
+            req = urllib.request.Request(target_url, headers={"User-Agent": "ABot-8088"})
+            with _NO_PROXY_OPENER.open(req, timeout=10) as resp:
+                data = resp.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+        except Exception as e:
+            self.send_error(500, f"Failed to fetch snapshot from 8090: {e}")
 
     def handle_sse_stream(self, query_string: str) -> None:
         """Stream frame-by-frame 3D reconstruction using Server-Sent Events (SSE)."""

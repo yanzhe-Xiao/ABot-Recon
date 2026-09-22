@@ -33,9 +33,11 @@ import json
 import shutil
 import sys
 import time
+import base64
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import open3d as o3d
@@ -43,7 +45,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +147,9 @@ class StreamSession:
     history_colors: List[torch.Tensor] = field(default_factory=list)
     history_conf: List[torch.Tensor] = field(default_factory=list)
     history_static_masks: List[torch.Tensor] = field(default_factory=list)
+    sampled_history_points: List[np.ndarray] = field(default_factory=list)
+    sampled_history_colors: List[np.ndarray] = field(default_factory=list)
+    latest_thumbnail: Optional[str] = None
     def __post_init__(self):
         if not self.scene_id:
             self.scene_id = self.session_id
@@ -183,6 +188,7 @@ class MultiSessionReconstructionManager:
         self.scenes_base_dir = scenes_base_dir
         self.scenes_base_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: Dict[str, StreamSession] = {}
+        self.subscribers: Dict[str, Set[asyncio.Queue]] = defaultdict(set)
         self.gpu_lock = asyncio.Lock()
         self.meta_lock = asyncio.Lock()
         self.scene_locks: Dict[str, asyncio.Lock] = {}
@@ -217,6 +223,77 @@ class MultiSessionReconstructionManager:
         )
         self.paged_template = self.network._paged_manager
         print("[Server Engine] Model initialized and paged KV cache template ready.")
+
+    def add_subscriber(self, session_id: str, queue: asyncio.Queue) -> None:
+        """Register a real-time observer queue for an active session or '*' for all sessions."""
+        self.subscribers[session_id].add(queue)
+
+    def remove_subscriber(self, session_id: str, queue: asyncio.Queue) -> None:
+        """Unregister a real-time observer queue."""
+        if session_id in self.subscribers and queue in self.subscribers[session_id]:
+            self.subscribers[session_id].remove(queue)
+            if not self.subscribers[session_id]:
+                del self.subscribers[session_id]
+
+    def broadcast_to_subscribers(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Broadcast an event payload to all observers subscribed to this session or '*'."""
+        targets = set()
+        if session_id in self.subscribers:
+            targets.update(self.subscribers[session_id])
+        if "*" in self.subscribers:
+            targets.update(self.subscribers["*"])
+        for q in targets:
+            try:
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except Exception:
+                        pass
+                q.put_nowait(message)
+            except Exception:
+                pass
+
+    def get_session_snapshot(self, session_id: str, max_points: int = 150000) -> Optional[Dict[str, Any]]:
+        """Extract accumulated history snapshot for late-joining observers."""
+        if session_id not in self.sessions:
+            return None
+        session = self.sessions[session_id]
+        if not session.sampled_history_points:
+            return None
+
+        try:
+            all_pts = np.concatenate(session.sampled_history_points, axis=0)
+            all_rgb = np.concatenate(session.sampled_history_colors, axis=0)
+        except Exception:
+            return None
+
+        total_pts = len(all_pts)
+        if total_pts > max_points:
+            indices = np.linspace(0, total_pts - 1, max_points, dtype=int)
+            all_pts = all_pts[indices]
+            all_rgb = all_rgb[indices]
+
+        # Round coordinates to 4 decimals to reduce JSON payload size
+        all_pts_rounded = np.round(all_pts, 4)
+
+        poses_list = [p.tolist() if isinstance(p, np.ndarray) else p for p in session.history_poses]
+        latest_pose = poses_list[-1] if poses_list else None
+
+        return {
+            "type": "history_sync",
+            "session_id": session.session_id,
+            "scene_id": session.scene_id,
+            "frame_counter": session.frame_counter,
+            "processed_counter": session.processed_counter,
+            "poses": poses_list,
+            "latest_pose": latest_pose,
+            "points_xyz": all_pts_rounded.tolist(),
+            "points_rgb": all_rgb.tolist(),
+            "total_points_in_session": total_pts,
+            "snapshot_point_count": len(all_pts),
+            "latest_thumbnail": session.latest_thumbnail,
+            "message": f"已恢复历史建图快照：共包含前 {session.processed_counter} 帧位姿轨迹与 {len(all_pts):,} 个已建点",
+        }
 
     def get_scene_metadata_path(self, scene_id: str) -> Path:
         return self.scenes_base_dir / scene_id / "scene_metadata.json"
@@ -367,6 +444,13 @@ class MultiSessionReconstructionManager:
         )
         self.sessions[session_id] = session
         self.register_session_to_scene(session_id, effective_scene_id)
+        self.broadcast_to_subscribers("*", {
+            "type": "session_created",
+            "session_id": session_id,
+            "scene_id": effective_scene_id,
+            "robot": session.robot,
+            "folder_name": session.folder_name,
+        })
         print(f"[Session] Created new session [{session_id}] for scene [{effective_scene_id}] (folder: {session.folder_name}, active: {len(self.sessions)})")
         return session
 
@@ -485,6 +569,7 @@ class MultiSessionReconstructionManager:
         result: Dict[str, Any] = {
             "type": "frame_result",
             "session_id": session.session_id,
+            "scene_id": session.scene_id,
             "frame_idx": current_idx,
             "frame_counter": session.frame_counter,
             "camera_pose": raw_pose.tolist(),  # 4x4 matrix
@@ -496,6 +581,28 @@ class MultiSessionReconstructionManager:
         if include_point_data:
             result["points_xyz"] = valid_pts.tolist()
             result["points_rgb"] = valid_rgb.tolist()
+
+        # Generate lightweight JPEG thumbnail for live HUD visualization
+        thumb_b64 = None
+        try:
+            thumb_io = io.BytesIO()
+            pil_img.resize((280, 157), Image.Resampling.BILINEAR).save(thumb_io, format="JPEG", quality=55)
+            thumb_b64 = "data:image/jpeg;base64," + base64.b64encode(thumb_io.getvalue()).decode("ascii")
+            result["thumbnail"] = thumb_b64
+        except Exception:
+            result["thumbnail"] = None
+
+        # Store in session sampled history for late-joining snapshot catchup
+        session.sampled_history_points.append(valid_pts)
+        session.sampled_history_colors.append(valid_rgb)
+        session.latest_thumbnail = thumb_b64
+
+        # Real-time broadcast to all attached viewers (always ensure 3D points are included for 3D viewers)
+        broadcast_payload = dict(result)
+        broadcast_payload["points_xyz"] = valid_pts.tolist()
+        broadcast_payload["points_rgb"] = valid_rgb.tolist()
+        broadcast_payload["thumbnail"] = thumb_b64
+        self.broadcast_to_subscribers(session.session_id, broadcast_payload)
         return result
 
     async def finalize_session(self, session_id: str) -> Dict[str, Any]:
@@ -684,8 +791,16 @@ class MultiSessionReconstructionManager:
         session.history_points.clear()
         session.history_colors.clear()
         session.history_conf.clear()
-        session.paged_manager = None
-        self.sessions.pop(session_id, None)
+        # Notify real-time subscribers of stream conclusion
+        self.broadcast_to_subscribers(session_id, {
+            "type": "stream_end",
+            "session_id": session_id,
+            "scene_id": scene_id,
+            "folder_name": session.folder_name,
+            "total_frames": total_frames,
+            "total_points": dedup_count if dedup_count > 0 else (total_frames * 5000),
+            "ply_url": deliverables.get("ply_url", f"/api/streams/{session.folder_name}/reconstruction.ply"),
+        })
 
         print(f"[Finalize] Session [{session_id}] finalized in {time.time() - t0:.2f}s! ({dedup_count:,} points) Scene [{scene_id}] updated.")
         return summary
@@ -1363,6 +1478,129 @@ async def websocket_stream(
 
 
 # ---------------------------------------------------------------------------
+# 1.1. Real-time Viewer WebSocket and SSE Endpoints (Observer/Visualizer Bridge)
+# ---------------------------------------------------------------------------
+@app.websocket("/ws/viewer")
+@app.websocket("/ws/viewer/{session_id}")
+async def websocket_viewer(
+    websocket: WebSocket,
+    session_id: Optional[str] = None,
+):
+    """
+    Real-time observer WebSocket for 3D visualizers (e.g. 8088 viewer).
+    Broadcasts frame results (poses, incremental points, HUD images) as video is streamed.
+    """
+    await websocket.accept()
+    manager = get_manager()
+    target_session = session_id.strip() if (session_id and session_id.strip() not in ("*", "all")) else "*"
+    q: asyncio.Queue = asyncio.Queue(maxsize=40)
+    manager.add_subscriber(target_session, q)
+
+    active_list = [
+        {
+            "session_id": sid,
+            "scene_id": s.scene_id,
+            "robot": s.robot,
+            "folder_name": s.folder_name,
+            "frames_received": s.frame_counter,
+            "frames_processed": s.processed_counter,
+        }
+        for sid, s in manager.sessions.items() if s.is_active
+    ]
+    await websocket.send_text(json.dumps({
+        "type": "viewer_connected",
+        "target_session": target_session,
+        "active_sessions": active_list,
+    }))
+
+    # If joining an ongoing session that has already reconstructed points, immediately catch up with history snapshot
+    if target_session and target_session != "*":
+        snapshot = manager.get_session_snapshot(target_session)
+        if snapshot:
+            await websocket.send_text(json.dumps(snapshot))
+
+    try:
+        while True:
+            msg = await q.get()
+            await websocket.send_text(json.dumps(msg))
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        manager.remove_subscriber(target_session, q)
+
+
+@app.get("/api/stream/live")
+@app.get("/api/stream/live/{session_id}")
+async def sse_viewer(
+    session_id: Optional[str] = None,
+):
+    """
+    Server-Sent Events (SSE) live stream endpoint for web visualizers.
+    Allows 8088 browser client to subscribe to any incoming video stream in real-time.
+    """
+    manager = get_manager()
+    target_session = session_id.strip() if (session_id and session_id.strip() not in ("*", "all")) else "*"
+    q: asyncio.Queue = asyncio.Queue(maxsize=40)
+    manager.add_subscriber(target_session, q)
+
+    async def event_generator():
+        try:
+            active_list = [
+                {
+                    "session_id": sid,
+                    "scene_id": s.scene_id,
+                    "robot": s.robot,
+                    "folder_name": s.folder_name,
+                    "frames_received": s.frame_counter,
+                    "frames_processed": s.processed_counter,
+                }
+                for sid, s in manager.sessions.items() if s.is_active
+            ]
+            init_data = json.dumps({
+                "type": "viewer_connected",
+                "target_session": target_session,
+                "active_sessions": active_list,
+            })
+            yield f"event: connect\ndata: {init_data}\n\n"
+
+            # If joining an ongoing session that has already reconstructed points, immediately catch up with history snapshot
+            if target_session and target_session != "*":
+                snapshot = manager.get_session_snapshot(target_session)
+                if snapshot:
+                    yield f"event: history_sync\ndata: {json.dumps(snapshot)}\n\n"
+
+            while True:
+                msg = await q.get()
+                ev_type = msg.get("type", "frame_result")
+                yield f"event: {ev_type}\ndata: {json.dumps(msg)}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            manager.remove_subscriber(target_session, q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.get("/api/stream/snapshot/{session_id}")
+async def get_stream_snapshot(session_id: str):
+    """Fetch current accumulated 3D reconstruction snapshot of an active stream."""
+    manager = get_manager()
+    snapshot = manager.get_session_snapshot(session_id.strip())
+    if not snapshot:
+        raise HTTPException(status_code=404, detail=f"No active point snapshot for session '{session_id}'")
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
 # 2. REST Endpoints (Alternative for Non-WebSocket Clients)
 # ---------------------------------------------------------------------------
 @app.post("/api/stream/start")
@@ -1440,22 +1678,30 @@ async def end_session(session_id: str = Query(...)):
 def list_sessions():
     """List all currently active sessions and completed session directories."""
     manager = get_manager()
+    now = time.time()
     active = [
         {
             "session_id": sid,
+            "scene_id": s.scene_id,
+            "robot": s.robot,
+            "folder_name": s.folder_name,
             "frames_received": s.frame_counter,
             "frames_processed": s.processed_counter,
-            "uptime_seconds": round(time.time() - s.created_at, 2),
+            "uptime_seconds": round(now - s.created_at, 1),
+            "last_active_seconds_ago": round(now - s.last_active, 1),
+            "is_active": s.is_active,
         }
         for sid, s in manager.sessions.items()
+        if s.is_active
     ]
     completed = []
     if manager.output_base_dir.is_dir():
-        for d in manager.output_base_dir.iterdir():
-            if d.is_dir() and (d / "reconstruction.ply").is_file():
+        for d in sorted(manager.output_base_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+            if d.is_dir() and not d.is_symlink() and (d / "reconstruction.ply").is_file():
                 ply = d / "reconstruction.ply"
                 completed.append({
                     "session_id": d.name,
+                    "folder_name": d.name,
                     "ply_size_mb": round(ply.stat().st_size / 1024 / 1024, 2),
                     "download_url": f"/api/streams/{d.name}/reconstruction.ply",
                 })

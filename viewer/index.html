@@ -541,40 +541,90 @@
 
     <!-- 实时流式建图模块 -->
     <div class="panel-section" style="border: 1px solid rgba(239, 68, 68, 0.3); padding: 12px; border-radius: 10px; background: rgba(239, 68, 68, 0.05);">
-      <div class="section-title" style="color:#f87171; border-color:rgba(239,68,68,0.2);">
+      <div class="section-title" style="color:#f87171; border-color:rgba(239,68,68,0.2); display:flex; justify-content:space-between; align-items:center;">
         <span>🔴 实时视频流建图 (Live Stream)</span>
+        <span id="badge-8090-status" style="font-size:10px; padding:2px 7px; border-radius:10px; background:rgba(59,130,246,0.15); color:#93c5fd; font-weight:600;">8090 探测中...</span>
       </div>
 
-      <div class="control-group">
-        <label style="font-size:12px; color:var(--text-muted);">📹 选择建图数据源 (outputs 点云或视频流)</label>
-        <select id="stream-sequence-select">
-          <option value="" disabled selected>正在扫描可用视频流与点云数据源...</option>
-        </select>
-      </div>
-
-      <div class="control-group">
-        <div class="control-row">
-          <label style="font-size:12px; color:var(--text-muted);">⏱️ 帧数限制</label>
-          <label style="font-size:12px; color:var(--text-muted);">⏩ 抽帧步长</label>
-        </div>
-        <div class="btn-group">
-          <select id="stream-max-frames">
-            <option value="60" selected>前 60 帧 (快速体验, 推荐)</option>
-            <option value="120">前 120 帧 (平滑长程)</option>
-            <option value="300">前 300 帧 (大场景)</option>
-            <option value="0">全部帧 (完整全长视频流)</option>
-          </select>
-          <select id="stream-frame-stride">
-            <option value="1" selected>Stride 1 (逐帧)</option>
-            <option value="2">Stride 2 (2x加速)</option>
-            <option value="3">Stride 3 (3x加速)</option>
-          </select>
+      <!-- 数据源模式切换 -->
+      <div class="control-group" style="margin-bottom:6px;">
+        <div style="display:flex; background:rgba(15,23,42,0.6); padding:2px; border-radius:6px; border:1px solid rgba(255,255,255,0.08); gap:2px;">
+          <button id="tab-mode-8090" type="button" style="flex:1; padding:5px 4px; font-size:11px; font-weight:600; border-radius:4px; border:none; background:rgba(56,189,248,0.25); color:#38bdf8; cursor:pointer; transition:all 0.2s;">
+            📡 8090 在线推流 (边拍边建)
+          </button>
+          <button id="tab-mode-local" type="button" style="flex:1; padding:5px 4px; font-size:11px; font-weight:500; border-radius:4px; border:none; background:transparent; color:#94a3b8; cursor:pointer; transition:all 0.2s;">
+            📁 本地预录序列
+          </button>
         </div>
       </div>
 
-      <div class="control-group" style="margin-top:4px;">
-        <button class="btn-stream" id="btn-stream-toggle">▶️ 启动实时流式建图 (全部完整视频流)</button>
-        <button class="view-btn" id="btn-stream-quick-view" style="margin-top:4px; display:none; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.4); color:#93c5fd;">👁️ 直接加载预览选中点云</button>
+      <!-- 8090 在线视频流分组 (8090 实时建图流选项框) -->
+      <div id="panel-8090-stream-group" style="display:block;">
+        <div class="control-group">
+          <div class="control-row" style="margin-bottom:4px;">
+            <label for="stream-8090-select" style="font-size:12px; color:#38bdf8; font-weight:600;">🔗 8090 连接的 Stream 视频流</label>
+            <button id="btn-refresh-8090" type="button" title="刷新 8090 会话列表" style="font-size:10px; padding:2px 6px; border-radius:4px; border:1px solid rgba(56,189,248,0.4); background:rgba(56,189,248,0.15); color:#38bdf8; cursor:pointer;">🔄 刷新</button>
+          </div>
+          <select id="stream-8090-select" style="width:100%; border:1px solid rgba(56,189,248,0.4); background:rgba(15,23,42,0.85); color:#f8fafc; font-size:12px; border-radius:6px; padding:6px 8px;">
+            <option value="" disabled selected>正在探测 8090 在线视频流...</option>
+          </select>
+          <!-- 8090 流状态元信息卡片 -->
+          <div id="stream-8090-meta" style="display:none; margin-top:6px; padding:6px 8px; border-radius:6px; background:rgba(30,41,59,0.75); border:1px solid rgba(56,189,248,0.25); font-size:11px; line-height:1.4;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span id="stream-8090-session-name" style="color:#38bdf8; font-weight:600; word-break:break-all;"></span>
+              <span id="stream-8090-status-tag" style="color:#34d399; font-size:10px; padding:1px 5px; border-radius:4px; background:rgba(16,185,129,0.2);">🟢 活跃推流中</span>
+            </div>
+            <div id="stream-8090-details" style="color:#94a3b8; font-size:10px; margin-top:2px;"></div>
+          </div>
+        </div>
+
+        <div class="control-group" style="margin-top:6px; display:flex; flex-direction:column; gap:4px;">
+          <button class="btn-stream" id="btn-8090-stream-toggle" style="background:linear-gradient(135deg, #0284c7, #2563eb); border:1px solid #38bdf8; font-weight:600; color:#fff;">
+            ▶️ 接入并实时查看 8090 建图
+          </button>
+          <button id="btn-camera-stream-toggle" type="button" style="width:100%; font-size:11px; font-weight:500; padding:6px 10px; border-radius:6px; border:1px solid rgba(16,185,129,0.5); background:rgba(16,185,129,0.15); color:#34d399; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px;">
+            <span>📷 开启手机/本机摄像头边拍边推流</span>
+          </button>
+        </div>
+
+        <div style="font-size:10px; color:#94a3b8; line-height:1.4; margin-top:4px; background:rgba(255,255,255,0.03); padding:5px 8px; border-radius:6px;">
+          💡 外部手机、相机或脚本连接 <code>ws://&lt;IP&gt;:8090/ws/stream?session_id=...</code> 开始拍视频，本选项框将自动感知并在此实时显示 3D 建图过程。
+        </div>
+      </div>
+
+      <!-- 本地离线预录数据源分组 -->
+      <div id="panel-local-stream-group" style="display:none;">
+        <div class="control-group">
+          <label style="font-size:12px; color:var(--text-muted);">📹 选择本地数据源 (outputs 点云或视频流)</label>
+          <select id="stream-sequence-select">
+            <option value="" disabled selected>正在扫描可用视频流与点云数据源...</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <div class="control-row">
+            <label style="font-size:12px; color:var(--text-muted);">⏱️ 帧数限制</label>
+            <label style="font-size:12px; color:var(--text-muted);">⏩ 抽帧步长</label>
+          </div>
+          <div class="btn-group">
+            <select id="stream-max-frames">
+              <option value="60" selected>前 60 帧 (快速体验, 推荐)</option>
+              <option value="120">前 120 帧 (平滑长程)</option>
+              <option value="300">前 300 帧 (大场景)</option>
+              <option value="0">全部帧 (完整全长视频流)</option>
+            </select>
+            <select id="stream-frame-stride">
+              <option value="1" selected>Stride 1 (逐帧)</option>
+              <option value="2">Stride 2 (2x加速)</option>
+              <option value="3">Stride 3 (3x加速)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="control-group" style="margin-top:4px;">
+          <button class="btn-stream" id="btn-stream-toggle">▶️ 启动本地离线流式建图</button>
+          <button class="view-btn" id="btn-stream-quick-view" style="margin-top:4px; display:none; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.4); color:#93c5fd;">👁️ 直接加载预览选中点云</button>
+        </div>
       </div>
 
       <div class="control-group" style="margin-top:2px;">
@@ -754,6 +804,18 @@
     let videoTotalFrames = 0;
     let hudPlayInterval = null;
     let isHudPlaying = false;
+
+    // 8090 实时在线推流建图状态
+    let currentStreamMode = '8090'; // '8090' 或 'local'
+    let eventSource8090 = null;
+    let is8090Streaming = false;
+    let current8090Session = null;
+    let cameraStreamActive = false;
+    let cameraMediaStream = null;
+    let cameraWebSocket = null;
+    let cameraInterval = null;
+    let cached8090Active = [];
+    let cached8090Completed = [];
 
     const container = document.getElementById('canvas-container');
 
@@ -973,20 +1035,188 @@
       }
     }
 
+    function handleFramePayload(data) {
+      const hudImg = document.getElementById('hud-img');
+      const hudPlaceholder = document.getElementById('hud-placeholder');
+      if (data.thumbnail) {
+        hudImg.src = data.thumbnail;
+        hudImg.style.display = 'block';
+        if (hudPlaceholder) hudPlaceholder.style.display = 'none';
+      } else if (data.image_url) {
+        hudImg.src = data.image_url;
+        hudImg.style.display = 'block';
+        if (hudPlaceholder) hudPlaceholder.style.display = 'none';
+      }
+
+      const fIdx = (data.frame_index !== undefined) ? data.frame_index : (data.frame_idx !== undefined ? data.frame_idx : 0);
+      const pCount = (data.point_count !== undefined) ? data.point_count : (data.incremental_point_count !== undefined ? data.incremental_point_count : 0);
+      const hudTag = document.getElementById('hud-frame-tag');
+      if (hudTag) {
+        hudTag.innerText = `帧 #${fIdx + 1} (+${pCount.toLocaleString()} 点)`;
+      }
+
+      if (data.camera_pose) {
+        const p = data.camera_pose;
+        const mat = new THREE.Matrix4().set(
+          p[0][0], p[0][1], p[0][2], p[0][3],
+          p[1][0], p[1][1], p[1][2], p[1][3],
+          p[2][0], p[2][1], p[2][2], p[2][3],
+          0, 0, 0, 1
+        );
+        liveCameraFrustum.matrixAutoUpdate = false;
+        liveCameraFrustum.matrix.copy(mat);
+
+        const currentPos = new THREE.Vector3(p[0][3], p[1][3], p[2][3]);
+        trajectoryPoints.push(currentPos);
+
+        if (fIdx % 3 === 0 || (data.total_frames && fIdx === data.total_frames - 1)) {
+          const frustum = createCameraFrustum(0.035, 0x38bdf8);
+          frustum.matrixAutoUpdate = false;
+          frustum.matrix.copy(mat);
+          trajectoryGroup.add(frustum);
+        }
+
+        trajectoryLine.geometry.setFromPoints(trajectoryPoints);
+        trajectoryLine.geometry.attributes.position.needsUpdate = true;
+
+        if (document.getElementById('chk-follow-camera').checked) {
+          controls.target.lerp(currentPos, 0.2);
+        }
+      }
+
+      if (data.points_xyz && data.points_rgb) {
+        appendPointsWithVoxelGrid(data.points_xyz, data.points_rgb);
+      }
+
+      const totalPts = allPositions.length / 3;
+      document.getElementById('stat-points').innerText = totalPts.toLocaleString();
+
+      if (data.total_frames) {
+        const progress = ((fIdx + 1) / data.total_frames) * 100;
+        document.getElementById('stream-progress-fill').style.width = `${progress}%`;
+        document.getElementById('stream-progress-text').innerText = `建图中: ${fIdx + 1} / ${data.total_frames} 帧`;
+      } else {
+        document.getElementById('stream-progress-text').innerText = `8090 实时建图中: 帧 #${fIdx + 1} (${totalPts.toLocaleString()} 点)`;
+      }
+
+      const fpsVal = data.fps || 0;
+      const latVal = (data.latency_ms !== undefined) ? data.latency_ms : (data.inference_time_ms || 0);
+      document.getElementById('stream-fps-text').innerText = `${fpsVal.toFixed(1)} FPS`;
+      document.getElementById('stat-latency').innerText = `${latVal} ms (${fpsVal.toFixed(1)} FPS)`;
+    }
+
+    function handleHistorySyncPayload(data) {
+      if (!data) return;
+
+      // 1. HUD image
+      if (data.latest_thumbnail) {
+        const hudImg = document.getElementById('hud-img');
+        const hudPlaceholder = document.getElementById('hud-placeholder');
+        if (hudImg) {
+          hudImg.src = data.latest_thumbnail;
+          hudImg.style.display = 'block';
+        }
+        if (hudPlaceholder) hudPlaceholder.style.display = 'none';
+      }
+
+      // 2. Trajectory poses & camera frustums
+      if (data.poses && data.poses.length > 0) {
+        const frustumStride = data.poses.length > 60 ? Math.ceil(data.poses.length / 30) : 2;
+        data.poses.forEach((p, idx) => {
+          const mat = new THREE.Matrix4().set(
+            p[0][0], p[0][1], p[0][2], p[0][3],
+            p[1][0], p[1][1], p[1][2], p[1][3],
+            p[2][0], p[2][1], p[2][2], p[2][3],
+            0, 0, 0, 1
+          );
+          const pos = new THREE.Vector3(p[0][3], p[1][3], p[2][3]);
+          trajectoryPoints.push(pos);
+
+          if (idx % frustumStride === 0 || idx === data.poses.length - 1) {
+            const isLast = (idx === data.poses.length - 1);
+            const frustum = createCameraFrustum(0.035, isLast ? 0x10b981 : 0x38bdf8);
+            frustum.matrixAutoUpdate = false;
+            frustum.matrix.copy(mat);
+            trajectoryGroup.add(frustum);
+          }
+        });
+
+        trajectoryLine.geometry.setFromPoints(trajectoryPoints);
+        trajectoryLine.geometry.attributes.position.needsUpdate = true;
+
+        if (data.latest_pose) {
+          const lp = data.latest_pose;
+          const lastMat = new THREE.Matrix4().set(
+            lp[0][0], lp[0][1], lp[0][2], lp[0][3],
+            lp[1][0], lp[1][1], lp[1][2], lp[1][3],
+            lp[2][0], lp[2][1], lp[2][2], lp[2][3],
+            0, 0, 0, 1
+          );
+          liveCameraFrustum.visible = true;
+          liveCameraFrustum.matrixAutoUpdate = false;
+          liveCameraFrustum.matrix.copy(lastMat);
+        }
+      }
+
+      // 3. Batch inject accumulated points
+      if (data.points_xyz && data.points_rgb && data.points_xyz.length > 0) {
+        appendPointsWithVoxelGrid(data.points_xyz, data.points_rgb);
+      }
+
+      const totalPts = allPositions.length / 3;
+      const fCount = data.processed_counter || (data.poses ? data.poses.length : 0);
+      document.getElementById('stat-points').innerText = totalPts.toLocaleString();
+      document.getElementById('stream-progress-text').innerText = `⚡ 已恢复前 ${fCount} 帧历史点云 (${totalPts.toLocaleString()} 点)，正在持续接收后续建图...`;
+      showToast(`⚡ 已追赶同步历史点云：前 ${fCount} 帧轨迹与 ${(data.snapshot_point_count || totalPts).toLocaleString()} 点！`);
+
+      // 4. Center 3D view on existing scene
+      resetView();
+    }
+
+    function stopAllStreams() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (eventSource8090) {
+        eventSource8090.close();
+        eventSource8090 = null;
+      }
+      fetch('/api/stop').catch(() => {});
+      isStreaming = false;
+      is8090Streaming = false;
+
+      const btnLocal = document.getElementById('btn-stream-toggle');
+      if (btnLocal) {
+        updateStreamButtonLabel();
+        btnLocal.classList.remove('running');
+      }
+      const btn8090 = document.getElementById('btn-8090-stream-toggle');
+      if (btn8090) {
+        btn8090.innerText = '▶️ 接入并实时查看 8090 建图';
+        btn8090.classList.remove('running');
+        btn8090.style.background = 'linear-gradient(135deg, #0284c7, #2563eb)';
+        btn8090.style.borderColor = '#38bdf8';
+      }
+      document.getElementById('live-indicator').style.display = 'none';
+      if (liveCameraFrustum) liveCameraFrustum.visible = false;
+    }
+
+    function stopLiveStream() {
+      stopAllStreams();
+    }
+
+    function stop8090LiveStream() {
+      stopAllStreams();
+    }
+
     async function startLiveStream() {
       if (isStreaming) {
         stopLiveStream();
         return;
       }
 
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-
-      try {
-        await fetch('/api/stop');
-      } catch (err) {}
+      stopAllStreams();
 
       voxelMap.clear();
       allPositions = [];
@@ -998,9 +1228,12 @@
 
       isStreaming = true;
       const btn = document.getElementById('btn-stream-toggle');
-      btn.innerText = '⏹️ 停止实时建图';
-      btn.classList.add('running');
+      if (btn) {
+        btn.innerText = '⏹️ 停止实时建图';
+        btn.classList.add('running');
+      }
       document.getElementById('live-indicator').style.display = 'inline-block';
+      document.getElementById('live-indicator').innerText = '● LIVE STREAMING';
       liveCameraFrustum.visible = true;
 
       const seq = document.getElementById('stream-sequence-select').value;
@@ -1017,55 +1250,6 @@
           stopLiveStream();
         }
       };
-      function handleFramePayload(data) {
-        const hudImg = document.getElementById('hud-img');
-        const hudPlaceholder = document.getElementById('hud-placeholder');
-        if (data.thumbnail) {
-          hudImg.src = data.thumbnail;
-          hudImg.style.display = 'block';
-          if (hudPlaceholder) hudPlaceholder.style.display = 'none';
-        } else if (data.image_url) {
-          hudImg.src = data.image_url;
-          hudImg.style.display = 'block';
-          if (hudPlaceholder) hudPlaceholder.style.display = 'none';
-        }
-        document.getElementById('hud-frame-tag').innerText = `帧 #${data.frame_index + 1} (${data.point_count} 点)`;
-
-        const p = data.camera_pose;
-        const mat = new THREE.Matrix4().set(
-          p[0][0], p[0][1], p[0][2], p[0][3],
-          p[1][0], p[1][1], p[1][2], p[1][3],
-          p[2][0], p[2][1], p[2][2], p[2][3],
-          0, 0, 0, 1
-        );
-        liveCameraFrustum.matrixAutoUpdate = false;
-        liveCameraFrustum.matrix.copy(mat);
-
-        const currentPos = new THREE.Vector3(p[0][3], p[1][3], p[2][3]);
-        trajectoryPoints.push(currentPos);
-
-        if (data.frame_index % 3 === 0 || data.frame_index === data.total_frames - 1) {
-          const frustum = createCameraFrustum(0.035, 0x38bdf8);
-          frustum.matrixAutoUpdate = false;
-          frustum.matrix.copy(mat);
-          trajectoryGroup.add(frustum);
-        }
-
-        trajectoryLine.geometry.setFromPoints(trajectoryPoints);
-        trajectoryLine.geometry.attributes.position.needsUpdate = true;
-
-        appendPointsWithVoxelGrid(data.points_xyz, data.points_rgb);
-
-        if (document.getElementById('chk-follow-camera').checked) {
-          controls.target.lerp(currentPos, 0.2);
-        }
-
-        const progress = ((data.frame_index + 1) / data.total_frames) * 100;
-        document.getElementById('stream-progress-fill').style.width = `${progress}%`;
-        document.getElementById('stream-progress-text').innerText = `建图中: ${data.frame_index + 1} / ${data.total_frames} 帧`;
-        document.getElementById('stream-fps-text').innerText = `${data.fps.toFixed(1)} FPS`;
-        document.getElementById('stat-latency').innerText = `${data.latency_ms} ms (${data.fps.toFixed(1)} FPS)`;
-      }
 
       eventSource.addEventListener('start', (e) => {
         const data = JSON.parse(e.data);
@@ -1090,29 +1274,388 @@
         stopLiveStream();
         resetView();
       });
+    }
 
-      eventSource.onerror = (err) => {
-        if (isStreaming) {
-          console.warn("SSE stream finished or closed.");
-          stopLiveStream();
+    async function start8090LiveStream() {
+      if (is8090Streaming) {
+        stop8090LiveStream();
+        return;
+      }
+
+      const select = document.getElementById('stream-8090-select');
+      const sid = select ? select.value : '';
+      if (!sid) {
+        showToast('⚠️ 当前无选中的 8090 视频流，请先通过外部推流或开启摄像头推流');
+        return;
+      }
+
+      stopAllStreams();
+
+      voxelMap.clear();
+      allPositions = [];
+      allColors = [];
+      trajectoryPoints = [];
+      trajectoryGroup.clear();
+      trajectoryGroup.add(trajectoryLine);
+      initDynamicPointCloud();
+
+      is8090Streaming = true;
+      current8090Session = sid;
+
+      const btn = document.getElementById('btn-8090-stream-toggle');
+      if (btn) {
+        btn.innerText = `⏹️ 断开 8090 监控 (${sid})`;
+        btn.classList.add('running');
+        btn.style.background = '#dc2626';
+        btn.style.borderColor = '#f87171';
+      }
+      document.getElementById('live-indicator').style.display = 'inline-block';
+      document.getElementById('live-indicator').innerText = `● 8090 LIVE (${sid})`;
+      liveCameraFrustum.visible = true;
+
+      document.getElementById('stream-progress-text').innerText = `已连接 8090 流 [${sid}]，正在实时同步建图...`;
+
+      const url = `/api/8090/live?session_id=${encodeURIComponent(sid)}`;
+      eventSource8090 = new EventSource(url);
+
+      eventSource8090.addEventListener('connect', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          showToast(`📡 已成功接入 8090 视频流 [${sid}]`);
+        } catch(err) {}
+      });
+
+      eventSource8090.addEventListener('history_sync', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          handleHistorySyncPayload(data);
+        } catch(err) {
+          console.warn("Failed to parse history_sync:", err);
+        }
+      });
+
+      eventSource8090.addEventListener('frame_result', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          handleFramePayload(data);
+        } catch(err) {}
+      });
+
+      eventSource8090.addEventListener('stream_end', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          document.getElementById('stream-progress-text').innerText = `✅ 8090 推流完成: 共 ${allPositions.length/3} 点`;
+          showToast(`✅ 8090 视频流 [${sid}] 拍摄建图完成！共 ${(allPositions.length/3).toLocaleString()} 点`);
+          stop8090LiveStream();
+          resetView();
+        } catch(err) {}
+      });
+
+      eventSource8090.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'history_sync') {
+            handleHistorySyncPayload(data);
+          } else if (data.type === 'frame_result' || data.camera_pose) {
+            handleFramePayload(data);
+          } else if (data.type === 'stream_end') {
+            document.getElementById('stream-progress-text').innerText = `✅ 8090 推流完成: 共 ${allPositions.length/3} 点`;
+            showToast(`✅ 8090 视频流 [${sid}] 拍摄建图完成！共 ${(allPositions.length/3).toLocaleString()} 点`);
+            stop8090LiveStream();
+            resetView();
+          }
+        } catch(err) {}
+      };
+
+      eventSource8090.onerror = () => {
+        if (is8090Streaming) {
+          console.warn("8090 live stream connection ended or waiting for new frames.");
         }
       };
     }
 
-    function stopLiveStream() {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
+    async function toggleLocalCameraStream() {
+      const btn = document.getElementById('btn-camera-stream-toggle');
+      if (cameraStreamActive) {
+        if (cameraInterval) clearInterval(cameraInterval);
+        cameraInterval = null;
+        if (cameraWebSocket) {
+          try {
+            cameraWebSocket.send(JSON.stringify({ type: 'EOS' }));
+            cameraWebSocket.close();
+          } catch(e) {}
+          cameraWebSocket = null;
+        }
+        if (cameraMediaStream) {
+          cameraMediaStream.getTracks().forEach(t => t.stop());
+          cameraMediaStream = null;
+        }
+        cameraStreamActive = false;
+        if (btn) {
+          btn.innerHTML = '<span>📷 开启手机/本机摄像头边拍边推流</span>';
+          btn.style.background = 'rgba(16,185,129,0.15)';
+          btn.style.borderColor = 'rgba(16,185,129,0.5)';
+          btn.style.color = '#34d399';
+        }
+        showToast('⏹️ 本机摄像头推流已结束');
+        fetch8090Sessions();
+        return;
       }
-      fetch('/api/stop').catch(() => {});
-      isStreaming = false;
-      const btn = document.getElementById('btn-stream-toggle');
-      if (btn) {
-        updateStreamButtonLabel();
-        btn.classList.remove('running');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            facingMode: "environment"
+          },
+          audio: false,
+        });
+        cameraMediaStream = stream;
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        await video.play();
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 504;
+        canvas.height = 280;
+        const ctx = canvas.getContext('2d');
+
+        const sid = `live_cam_${Date.now().toString().slice(-4)}`;
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProto}//${location.hostname}:8090/ws/stream?session_id=${sid}&dynamic_filter=false&point_stride=4&frame_stride=1`;
+
+        cameraWebSocket = new WebSocket(wsUrl);
+        cameraWebSocket.binaryType = 'arraybuffer';
+
+        cameraWebSocket.onopen = () => {
+          showToast(`📹 摄像头开始拍视频推流中 (Session: ${sid})`);
+          cameraStreamActive = true;
+          if (btn) {
+            btn.innerHTML = `<span>⏹️ 停止摄像头推流 (${sid})</span>`;
+            btn.style.background = 'rgba(239,68,68,0.2)';
+            btn.style.borderColor = 'rgba(239,68,68,0.5)';
+            btn.style.color = '#f87171';
+          }
+
+          cameraInterval = setInterval(() => {
+            if (!cameraStreamActive || cameraWebSocket.readyState !== WebSocket.OPEN) return;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((blob) => {
+              if (blob && cameraWebSocket && cameraWebSocket.readyState === WebSocket.OPEN) {
+                blob.arrayBuffer().then(buf => {
+                  cameraWebSocket.send(buf);
+                });
+              }
+            }, 'image/jpeg', 0.7);
+          }, 85);
+
+          setTimeout(async () => {
+            await fetch8090Sessions();
+            const sel = document.getElementById('stream-8090-select');
+            if (sel) {
+              sel.value = sid;
+              start8090LiveStream();
+            }
+          }, 600);
+        };
+
+        cameraWebSocket.onerror = (err) => {
+          console.warn("Camera WS error:", err);
+          showToast('⚠️ 摄像头推流连接 8090 异常，请确保 8090 服务已启动');
+        };
+
+        cameraWebSocket.onclose = () => {
+          if (cameraStreamActive) {
+            toggleLocalCameraStream();
+          }
+        };
+
+      } catch (err) {
+        console.error("Camera access error:", err);
+        showToast(`⚠️ 无法访问摄像头: ${err.message}`);
       }
-      document.getElementById('live-indicator').style.display = 'none';
-      if (liveCameraFrustum) liveCameraFrustum.visible = false;
+    }
+
+    function setStreamMode(mode) {
+      currentStreamMode = mode;
+      const tab8090 = document.getElementById('tab-mode-8090');
+      const tabLocal = document.getElementById('tab-mode-local');
+      const panel8090 = document.getElementById('panel-8090-stream-group');
+      const panelLocal = document.getElementById('panel-local-stream-group');
+
+      if (mode === '8090') {
+        if (tab8090) {
+          tab8090.style.background = 'rgba(56,189,248,0.25)';
+          tab8090.style.color = '#38bdf8';
+          tab8090.style.fontWeight = '600';
+        }
+        if (tabLocal) {
+          tabLocal.style.background = 'transparent';
+          tabLocal.style.color = '#94a3b8';
+          tabLocal.style.fontWeight = '500';
+        }
+        if (panel8090) panel8090.style.display = 'block';
+        if (panelLocal) panelLocal.style.display = 'none';
+        fetch8090Sessions();
+      } else {
+        if (tab8090) {
+          tab8090.style.background = 'transparent';
+          tab8090.style.color = '#94a3b8';
+          tab8090.style.fontWeight = '500';
+        }
+        if (tabLocal) {
+          tabLocal.style.background = 'rgba(56,189,248,0.25)';
+          tabLocal.style.color = '#38bdf8';
+          tabLocal.style.fontWeight = '600';
+        }
+        if (panel8090) panel8090.style.display = 'none';
+        if (panelLocal) panelLocal.style.display = 'block';
+      }
+    }
+
+    function update8090MetaCard(activeList, completedList) {
+      const select = document.getElementById('stream-8090-select');
+      const metaDiv = document.getElementById('stream-8090-meta');
+      const nameSpan = document.getElementById('stream-8090-session-name');
+      const tagSpan = document.getElementById('stream-8090-status-tag');
+      const detailsDiv = document.getElementById('stream-8090-details');
+      if (!select || !metaDiv) return;
+
+      const sid = select.value;
+      if (!sid) {
+        metaDiv.style.display = 'none';
+        return;
+      }
+
+      const active = (activeList || cached8090Active).find(s => s.session_id === sid);
+      if (active) {
+        metaDiv.style.display = 'block';
+        if (nameSpan) nameSpan.innerText = `会话: ${active.session_id}`;
+        if (tagSpan) {
+          tagSpan.innerText = '🟢 在线推流中';
+          tagSpan.style.background = 'rgba(16,185,129,0.2)';
+          tagSpan.style.color = '#34d399';
+        }
+        if (detailsDiv) {
+          detailsDiv.innerText = `场景: ${active.scene_id} | 接收: ${active.frames_received} 帧 | 处理: ${active.frames_processed} 帧 | 活跃: ${active.last_active_seconds_ago}s 前`;
+        }
+        return;
+      }
+
+      const comp = (completedList || cached8090Completed).find(c => c.session_id === sid);
+      if (comp) {
+        metaDiv.style.display = 'block';
+        if (nameSpan) nameSpan.innerText = `会话: ${comp.session_id}`;
+        if (tagSpan) {
+          tagSpan.innerText = '⏹️ 已完成';
+          tagSpan.style.background = 'rgba(148,163,184,0.2)';
+          tagSpan.style.color = '#94a3b8';
+        }
+        if (detailsDiv) {
+          detailsDiv.innerText = `已生成点云资产: ${comp.ply_size_mb} MB | 资产目录: outputs/streams/${comp.folder_name || comp.session_id}`;
+        }
+        return;
+      }
+
+      metaDiv.style.display = 'none';
+    }
+
+    async function fetch8090Sessions(isUserClick = false) {
+      const badge = document.getElementById('badge-8090-status');
+      const select = document.getElementById('stream-8090-select');
+      try {
+        const res = await fetch('/api/8090/sessions?t=' + Date.now());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.status === 'stopped') {
+          if (badge) {
+            badge.innerText = '8090 未启动';
+            badge.style.background = 'rgba(239,68,68,0.2)';
+            badge.style.color = '#f87171';
+          }
+          if (select && !is8090Streaming && select.options.length <= 1) {
+            select.innerHTML = '<option value="" disabled selected>⚪ 8090 服务未启动 (外部推流时将自动拉起)</option>';
+          }
+          if (isUserClick) showToast('⚠️ 8090 服务未启动');
+          return;
+        }
+
+        const activeList = data.active_sessions || [];
+        const completedList = data.completed_sessions || [];
+        cached8090Active = activeList;
+        cached8090Completed = completedList;
+
+        if (badge) {
+          if (activeList.length > 0) {
+            badge.innerText = `● 在线 (${activeList.length} 路推流)`;
+            badge.style.background = 'rgba(16,185,129,0.2)';
+            badge.style.color = '#34d399';
+          } else {
+            badge.innerText = '8090 就绪 (等待推流)';
+            badge.style.background = 'rgba(56,189,248,0.2)';
+            badge.style.color = '#38bdf8';
+          }
+        }
+
+        if (!select || is8090Streaming) return;
+
+        const previousVal = select.value;
+        select.innerHTML = '';
+
+        if (activeList.length === 0) {
+          const emptyOpt = document.createElement('option');
+          emptyOpt.value = '';
+          emptyOpt.disabled = true;
+          emptyOpt.selected = true;
+          emptyOpt.innerText = '⚪ 暂无在线连接的 8090 视频流 (等待推流...)';
+          select.appendChild(emptyOpt);
+        } else {
+          const activeGroup = document.createElement('optgroup');
+          activeGroup.label = '🔴 正在连接推流中的视频流 (实时)';
+          activeList.forEach((s) => {
+            const opt = document.createElement('option');
+            opt.value = s.session_id;
+            opt.innerText = `🟢 ${s.session_id} (在线推流中 · 接收 ${s.frames_received} 帧 · 活跃: ${s.last_active_seconds_ago}s 前)`;
+            if (s.session_id === previousVal) opt.selected = true;
+            activeGroup.appendChild(opt);
+          });
+          select.appendChild(activeGroup);
+        }
+
+        if (completedList.length > 0) {
+          const compGroup = document.createElement('optgroup');
+          compGroup.label = '📦 最近已完成推流会话 (历史结果)';
+          completedList.slice(0, 10).forEach((c) => {
+            const opt = document.createElement('option');
+            opt.value = c.session_id;
+            opt.innerText = `⏹️ ${c.session_id} (${c.ply_size_mb} MB)`;
+            if (c.session_id === previousVal) opt.selected = true;
+            compGroup.appendChild(opt);
+          });
+          select.appendChild(compGroup);
+        }
+
+        if ((!select.value || select.value === '') && activeList.length > 0) {
+          select.value = activeList[0].session_id;
+        }
+
+        update8090MetaCard(activeList, completedList);
+
+        if (isUserClick) {
+          showToast(`🔄 已刷新 8090 会话: ${activeList.length} 个在线活跃流，${completedList.length} 个历史流`);
+        }
+      } catch (err) {
+        if (badge) {
+          badge.innerText = '8090 离线';
+          badge.style.background = 'rgba(239,68,68,0.2)';
+          badge.style.color = '#f87171';
+        }
+        if (isUserClick) showToast('❌ 刷新 8090 会话失败');
+      }
     }
 
     function parseNpy(buffer) {
@@ -1582,6 +2125,24 @@
 
     // --- 事件绑定 ---
     document.getElementById('btn-stream-toggle').addEventListener('click', startLiveStream);
+
+    const tab8090 = document.getElementById('tab-mode-8090');
+    if (tab8090) tab8090.addEventListener('click', () => setStreamMode('8090'));
+
+    const tabLocal = document.getElementById('tab-mode-local');
+    if (tabLocal) tabLocal.addEventListener('click', () => setStreamMode('local'));
+
+    const btnRefresh8090 = document.getElementById('btn-refresh-8090');
+    if (btnRefresh8090) btnRefresh8090.addEventListener('click', () => fetch8090Sessions(true));
+
+    const select8090 = document.getElementById('stream-8090-select');
+    if (select8090) select8090.addEventListener('change', () => update8090MetaCard());
+
+    const btn8090Toggle = document.getElementById('btn-8090-stream-toggle');
+    if (btn8090Toggle) btn8090Toggle.addEventListener('click', start8090LiveStream);
+
+    const btnCamToggle = document.getElementById('btn-camera-stream-toggle');
+    if (btnCamToggle) btnCamToggle.addEventListener('click', toggleLocalCameraStream);
 
     document.getElementById('dedup-mode').addEventListener('change', (e) => {
       const isVoxel = e.target.value === 'voxel';
@@ -2098,6 +2659,14 @@
 
       refreshOfflineModels(true, false);
       initVideoUploadController();
+      fetch8090Sessions(false);
+
+      // Auto-refresh 8090 active sessions every 3 seconds when idle
+      setInterval(() => {
+        if (!is8090Streaming && currentStreamMode === '8090') {
+          fetch8090Sessions(false);
+        }
+      }, 3000);
     }
 
     function showToast(msg) {
