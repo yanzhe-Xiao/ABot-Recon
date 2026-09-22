@@ -53,6 +53,11 @@ except ImportError:
     HAS_RICH = False
 
 
+def clean_gpu_name(raw_name: str) -> str:
+    """Clean up verbose GPU model names for compact terminal display."""
+    return raw_name.replace("NVIDIA GeForce ", "").replace("NVIDIA ", "").strip()
+
+
 @dataclass
 class GPUStats:
     index: int
@@ -275,8 +280,9 @@ class StreamGPUMonitor:
             used_gb = s.mem_used_mb / 1024.0
             total_gb = s.mem_total_mb / 1024.0
             peak_gb = s.peak_mem_mb / 1024.0
+            display_name = clean_gpu_name(s.name)
             print(
-                f"[{now_str}] GPU {s.index} ({s.name[:18]}): "
+                f"[{now_str}] GPU {s.index} ({display_name}): "
                 f"Util: {s.util_gpu:3d}% | "
                 f"VRAM: {used_gb:4.1f}/{total_gb:4.1f} GB ({s.mem_percent:5.1f}%, Peak: {peak_gb:4.1f}GB) | "
                 f"Temp: {s.temp_c:2d}°C | Power: {s.power_w:4.0f}W | {active_str}"
@@ -289,10 +295,14 @@ class StreamGPUMonitor:
 
     def render_rich(self, stats: List[GPUStats], procs: List[ProcessInfo], session_data: Dict[str, Any]) -> Layout:
         layout = Layout()
+        gpu_table_size = len(stats) + 5
+        active_list = session_data.get("active", [])
+        sess_table_size = max(1, len(active_list)) + 5
+
         layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="gpu_table", size=len(stats) + 4),
-            Layout(name="sessions", size=max(4, len(session_data.get("active", [])) + 4)),
+            Layout(name="gpu_table", size=gpu_table_size),
+            Layout(name="sessions", size=sess_table_size),
             Layout(name="procs"),
         )
 
@@ -310,43 +320,43 @@ class StreamGPUMonitor:
 
         # GPU Overview Table
         gpu_table = Table(title="🖥️ GPU & 显存占用状态 (实时 / 峰值)", expand=True)
-        gpu_table.add_column("GPU", justify="center", style="bold white", width=6)
-        gpu_table.add_column("型号", style="white")
-        gpu_table.add_column("算力负载 (%)", justify="right")
-        gpu_table.add_column("当前显存使用", justify="right")
-        gpu_table.add_column("显存占比", justify="center")
-        gpu_table.add_column("峰值显存 (Peak)", justify="right", style="bold magenta")
-        gpu_table.add_column("温度", justify="center")
-        gpu_table.add_column("功耗", justify="right")
+        gpu_table.add_column("GPU", justify="center", style="bold white", width=7, no_wrap=True)
+        gpu_table.add_column("型号", style="white", width=12, no_wrap=True)
+        gpu_table.add_column("算力负载", justify="right", width=8, no_wrap=True)
+        gpu_table.add_column("显存占用", justify="right", width=18, no_wrap=True)
+        gpu_table.add_column("显存占比", justify="center", ratio=1, min_width=16, no_wrap=True)
+        gpu_table.add_column("峰值显存", justify="right", style="bold magenta", width=10, no_wrap=True)
+        gpu_table.add_column("温度", justify="center", width=6, no_wrap=True)
+        gpu_table.add_column("功耗", justify="right", width=8, no_wrap=True)
 
         for s in stats:
             # Color coding
             util_color = "green" if s.util_gpu < 50 else ("yellow" if s.util_gpu < 85 else "red")
             mem_color = "green" if s.mem_percent < 60 else ("yellow" if s.mem_percent < 85 else "red bold")
 
-            # Progress bar visualization for VRAM
-            bar_len = 16
+            # Progress bar visualization for VRAM (compact 10 chars)
+            bar_len = 10
             filled = int(bar_len * (s.mem_percent / 100.0))
             bar_str = "█" * filled + "░" * (bar_len - filled)
 
             used_gb = s.mem_used_mb / 1024.0
             total_gb = s.mem_total_mb / 1024.0
             peak_gb = s.peak_mem_mb / 1024.0
+            display_name = clean_gpu_name(s.name)
 
             gpu_table.add_row(
                 f"GPU {s.index}",
-                s.name,
+                display_name,
                 f"[{util_color}]{s.util_gpu}%[/{util_color}]",
                 f"[{mem_color}]{used_gb:.2f} / {total_gb:.2f} GB[/{mem_color}]",
                 f"[{mem_color}]{bar_str} {s.mem_percent:.1f}%[/{mem_color}]",
                 f"{peak_gb:.2f} GB",
-                f"{s.temp_c} °C",
+                f"{s.temp_c}°C",
                 f"{s.power_w:.1f} W",
             )
         layout["gpu_table"].update(gpu_table)
 
         # Video Streaming Sessions Table
-        active_list = session_data.get("active", [])
         status_color = "green" if session_data["status"] == "online" else ("yellow" if session_data["status"] == "disabled" else "red")
         sess_title = f"🎥 视频流建图状态 (API 8090: [{status_color}]{session_data['status']}[/{status_color}] | 活动流: {len(active_list)})"
         sess_table = Table(title=sess_title, expand=True)
@@ -376,21 +386,20 @@ class StreamGPUMonitor:
 
         # Running Processes Table
         proc_table = Table(title="⚙️ 占用显存的相关进程列表 (PID & 显存占用)", expand=True)
-        proc_table.add_column("PID", style="bold white", width=9)
-        proc_table.add_column("GPU", justify="center", width=6)
-        proc_table.add_column("显存占用", justify="right", style="magenta")
-        proc_table.add_column("进程名", style="white")
-        proc_table.add_column("启动命令 / 脚本", style="dim")
+        proc_table.add_column("PID", style="bold white", justify="right", width=9, no_wrap=True)
+        proc_table.add_column("GPU", justify="center", width=7, no_wrap=True)
+        proc_table.add_column("显存占用", justify="right", style="magenta", width=12, no_wrap=True)
+        proc_table.add_column("进程名", style="white", width=18, no_wrap=True)
+        proc_table.add_column("启动命令 / 脚本", style="dim", ratio=1, no_wrap=True, overflow="ellipsis")
 
         for p in procs:
             tag = "[bold green][建图相关][/bold green] " if p.is_recon else ""
-            clean_cmd = p.cmdline if len(p.cmdline) < 80 else p.cmdline[:77] + "..."
             proc_table.add_row(
                 str(p.pid),
                 f"GPU {p.gpu_index}",
                 f"{p.used_mem_mb:.1f} MB",
                 f"{tag}{p.name}",
-                clean_cmd,
+                p.cmdline,
             )
         if not procs:
             proc_table.add_row("-", "-", "-", "[italic dim]未检测到活动计算进程", "-")
